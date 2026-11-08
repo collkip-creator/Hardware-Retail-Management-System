@@ -10,6 +10,7 @@ on:
       - "src-tauri/**"
       - "desktop.html"
       - "package.json"
+      - "package-lock.json"
       - "vite.desktop.config.ts"
       - ".github/workflows/windows-desktop.yml"
 
