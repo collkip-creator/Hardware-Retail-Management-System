@@ -1179,3 +1179,14 @@ button:disabled {
 .return-form select,.return-form input { min-width:0; }
 @media (max-width:600px) { .pos-product-grid { grid-template-columns:1fr; } .pos-shift { grid-template-columns:1fr; } .pos-cart-row { grid-template-columns:minmax(0,1fr) 55px; } .pos-cart-row b { grid-column:1; } }
 
+
+
+.desktop-pairing-panel { border: 1px solid #cfe1d3; }
+.desktop-pairing-panel .panel-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+.desktop-pairing-panel .panel-heading p { max-width:620px; }
+.pairing-code-result { display:flex; flex-direction:column; align-items:flex-start; gap:7px; margin:18px 0; padding:18px; border:1px dashed #a9cbb2; border-radius:12px; background:#f2f8f3; }
+.pairing-code-label { color:#60776a; font-size:10px; font-weight:800; letter-spacing:1.2px; }
+.pairing-code-result strong { color:#174b35; font-size:34px; letter-spacing:8px; font-variant-numeric:tabular-nums; }
+.pairing-code-result p { margin:0; color:#4e6355; font-size:12px; }
+.pairing-code-result small { color:#718177; font-size:11px; }
+@media(max-width:640px) { .pairing-code-result strong { font-size:27px; letter-spacing:5px; } }
