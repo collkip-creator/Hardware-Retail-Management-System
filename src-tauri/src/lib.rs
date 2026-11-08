@@ -1,7 +1,8 @@
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
+use rand_core::OsRng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::{fs, path::PathBuf, sync::Mutex};
@@ -310,4 +311,37 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_schema_initialises_with_sync_and_staff_tables() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_schema(&connection).expect("schema should initialise");
+
+        let device_id: String = connection
+            .query_row("SELECT value FROM app_meta WHERE key = 'device_id'", [], |row| row.get(0))
+            .expect("device identity should be generated");
+        assert!(!device_id.is_empty());
+
+        let outbox_table: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sync_outbox'", [], |row| row.get(0))
+            .expect("sync outbox table should exist");
+        let accounts_table: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='staff_accounts'", [], |row| row.get(0))
+            .expect("staff accounts table should exist");
+        assert_eq!(outbox_table, 1);
+        assert_eq!(accounts_table, 1);
+    }
+
+    #[test]
+    fn password_hash_is_salted_and_verifiable() {
+        let hash = hash_password("a-long-test-password").expect("hash should be generated");
+        assert_ne!(hash, "a-long-test-password");
+        assert!(verify_password("a-long-test-password", &hash).expect("verification should run"));
+        assert!(!verify_password("a-different-password", &hash).expect("verification should run"));
+    }
 }
