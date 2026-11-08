@@ -8,8 +8,7 @@ export default defineConfig({
   build: {
     outDir: 'dist-desktop',
     emptyOutDir: true,
-    // Tauri loads dist/index.html by default. Name the desktop HTML entry
-    // "index" even though the source file is desktop.html.
-    rollupOptions: { input: { index: 'desktop.html' } },
+    // Build from the real index.html entry expected by Tauri.
+    rollupOptions: { input: 'index.html' },
   },
 });
