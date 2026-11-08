@@ -570,8 +570,9 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
     let remote_staff_ids: Vec<&str> = snapshot["staff"].as_array().map(|rows| rows.iter().filter_map(|item| item["profile"]["id"].as_str()).collect()).unwrap_or_default();
     let local_staff_ids: Vec<String> = {
         let mut statement=connection.prepare("SELECT staff_profile_id FROM staff_accounts").map_err(|e|e.to_string())?;
-        statement.query_map([],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?
-            .collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?
+        let rows=statement.query_map([],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?;
+        let collected=rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        collected
     };
     if local_staff_ids.iter().any(|id| !remote_staff_ids.contains(&id.as_str())) {
         return Err("This computer already has a different local owner or staff account. Pairing cannot overwrite it. Use a clean Windows installation or contact support.".into());
