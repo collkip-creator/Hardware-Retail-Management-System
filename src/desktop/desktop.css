@@ -1,0 +1,69 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap');
+
+:root {
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  color: #18251f;
+  background: #f3f6f3;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input { font: inherit; }
+.screen { min-height: 100vh; padding: 40px 24px; display: flex; align-items: center; justify-content: center; }
+.panel, .workspace { width: 100%; background: #fff; border: 1px solid #e1e9e3; border-radius: 20px; box-shadow: 0 18px 55px rgba(25, 55, 38, .08); }
+.panel { padding: 38px; }
+.narrow { max-width: 470px; }
+.brand { display: flex; align-items: center; gap: 12px; margin-bottom: 34px; }
+.brand-mark { width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; background: #174b35; color: #fff; font: 800 16px Manrope, sans-serif; letter-spacing: -.5px; }
+.brand strong, .brand span { display: block; }
+.brand strong { font: 800 15px Manrope, sans-serif; color: #183b2b; }
+.brand span { color: #78877e; font-size: 12px; margin-top: 2px; }
+h1, h2 { font-family: Manrope, 'Segoe UI', sans-serif; letter-spacing: -.6px; }
+h1 { font-size: 27px; margin: 24px 0 8px; color: #173b2b; }
+h2 { font-size: 18px; margin: 0 0 9px; color: #173b2b; }
+p { line-height: 1.6; }
+.muted { color: #718078; font-size: 13px; }
+.status-line { display: inline-flex; align-items: center; gap: 8px; color: #65756b; font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.online { background: #2b9a62; }
+.offline { background: #d69b36; }
+.status-separator { color: #c2cbc5; }
+form { margin-top: 24px; display: grid; gap: 16px; }
+label { display: grid; gap: 7px; color: #35463c; font-size: 13px; font-weight: 600; }
+input { width: 100%; padding: 12px 13px; border: 1px solid #d8e1da; border-radius: 9px; color: #1d2b23; background: #fff; outline: none; }
+input:focus { border-color: #2c7952; box-shadow: 0 0 0 3px rgba(44,121,82,.11); }
+small { color: #829087; font-size: 11px; font-weight: 400; }
+button { border: 0; border-radius: 9px; padding: 12px 16px; cursor: pointer; font-weight: 700; }
+button:disabled { opacity: .6; cursor: wait; }
+.primary { margin-top: 4px; background: #174b35; color: white; }
+.primary:hover:not(:disabled) { background: #103b29; }
+.secondary { padding: 9px 13px; background: #edf3ef; color: #315441; font-size: 12px; }
+.error { color: #a83232; background: #fff1f0; border: 1px solid #f5d1ce; padding: 10px 12px; border-radius: 8px; font-size: 12px; margin: 0; }
+.footnote { border-top: 1px solid #edf1ed; margin-top: 26px; padding-top: 15px; color: #9aa69e; font-size: 10px; }
+.workspace { max-width: 1080px; padding: 32px 38px; }
+.topbar, .top-actions { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.brand.compact { margin: 0; }
+.top-actions { gap: 20px; }
+.welcome { margin: 54px 0 26px; }
+.eyebrow { font-size: 10px; letter-spacing: 1.5px; color: #498364; font-weight: 700; }
+.welcome h1 { margin: 7px 0 4px; font-size: 32px; }
+.welcome p:last-child { margin-top: 5px; }
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
+.info-card { border: 1px solid #e3ebe5; border-radius: 13px; padding: 20px; background: #fcfdfc; }
+.card-label { display: block; color: #78877e; font-size: 11px; margin-bottom: 12px; }
+.info-card strong { display: block; font: 700 20px Manrope, sans-serif; color: #1b5138; }
+.info-card p { margin: 8px 0 0; color: #78877e; font-size: 11px; line-height: 1.5; }
+.notice { margin-top: 20px; padding: 23px; border-radius: 13px; background: #f2f7f3; border: 1px solid #e2ece4; }
+.notice p { margin: 7px 0; font-size: 13px; color: #45574b; }
+.notice .muted { font-size: 11px; color: #7c8b81; }
+.workspace-footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 24px; color: #9aa69e; font-size: 10px; }
+.loading { color: #63746a; font-size: 13px; }
+@media (max-width: 720px) {
+  .screen { padding: 16px; }
+  .panel, .workspace { padding: 24px; }
+  .grid { grid-template-columns: 1fr; }
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .welcome { margin-top: 35px; }
+  .workspace-footer { flex-direction: column; }
+}
