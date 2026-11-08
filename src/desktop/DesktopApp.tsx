@@ -8,6 +8,8 @@ type Branch = { id: string; name: string; code: string | null; status: string };
 type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
 type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
 type Tab = 'overview' | 'business' | 'branches' | 'staff' | 'devices';
+type SyncStatus = { paired: boolean; ownerDevice: boolean; lastSyncAt: string | null };
+type SyncResult = { ownerDevice: boolean; updatedAt: string; branches: number; staff: number };
 
 export default function DesktopApp() {
   const [status, setStatus] = useState<LocalStatus | null>(null);
@@ -34,9 +36,28 @@ export default function DesktopApp() {
   const [newStaffRole, setNewStaffRole] = useState('Cashier');
   const [newStaffBranch, setNewStaffBranch] = useState('');
   const [credentials, setCredentials] = useState<{ username: string; temporaryPassword: string } | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ paired: false, ownerDevice: false, lastSyncAt: null });
+  const [pairingCode, setPairingCode] = useState('');
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
-    invoke<LocalStatus>('get_local_status').then(setStatus).catch((e) => setError(String(e))).finally(() => setLoading(false));
+    const initialise = async () => {
+      try {
+        let local = await invoke<LocalStatus>('get_local_status');
+        const sync = await invoke<SyncStatus>('get_device_sync_status');
+        setSyncStatus(sync);
+        if (sync.paired && navigator.onLine) {
+          try {
+            const result = await invoke<SyncResult>('sync_desktop_workspace');
+            setSyncStatus({ ...sync, lastSyncAt: result.updatedAt });
+            local = await invoke<LocalStatus>('get_local_status');
+          } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); }
+        }
+        setStatus(local);
+      } catch (e) { setError(String(e)); }
+      finally { setLoading(false); }
+    };
+    initialise();
     const onOnline = () => setOnline(true), onOffline = () => setOnline(false);
     window.addEventListener('online', onOnline); window.addEventListener('offline', onOffline);
     return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline); };
@@ -57,6 +78,45 @@ export default function DesktopApp() {
     if (session?.role === 'Business Owner') refreshWorkspace(session.staffId).catch((e) => setError(String(e)));
   }, [session?.staffId]);
 
+  async function syncIfPaired() {
+    const current = await invoke<SyncStatus>('get_device_sync_status');
+    setSyncStatus(current);
+    if (!current.paired || !navigator.onLine) return;
+    const result = await invoke<SyncResult>('sync_desktop_workspace');
+    setSyncStatus({ ...current, lastSyncAt: result.updatedAt });
+  }
+
+  async function pairThisComputer(event?: FormEvent) {
+    event?.preventDefault(); setError(''); setNotice(''); setSyncing(true);
+    try {
+      if (!navigator.onLine) throw new Error('Connect this computer to the internet before pairing.');
+      await invoke('pair_desktop_device', { pairingCode: pairingCode.trim(), deviceName: 'Windows desktop' });
+      setPairingCode('');
+      const result = await invoke<SyncResult>('sync_desktop_workspace');
+      const next = await invoke<SyncStatus>('get_device_sync_status');
+      setSyncStatus({ ...next, lastSyncAt: result.updatedAt });
+      setStatus(await invoke<LocalStatus>('get_local_status'));
+      if (session?.role === 'Business Owner') await refreshWorkspace(session.staffId);
+      setNotice(result.ownerDevice ? 'This is now the primary owner computer. Business and staff data have been uploaded securely.' : 'This computer has been paired and the latest staff accounts and business setup have been downloaded.');
+    } catch (e) {
+      const next = await invoke<SyncStatus>('get_device_sync_status').catch(() => syncStatus);
+      setSyncStatus(next); setError(String(e).replace(/^Error: /, ''));
+    } finally { setSyncing(false); }
+  }
+
+  async function syncNow() {
+    setError(''); setNotice(''); setSyncing(true);
+    try {
+      const result = await invoke<SyncResult>('sync_desktop_workspace');
+      const next = await invoke<SyncStatus>('get_device_sync_status');
+      setSyncStatus({ ...next, lastSyncAt: result.updatedAt });
+      setStatus(await invoke<LocalStatus>('get_local_status'));
+      if (session?.role === 'Business Owner') await refreshWorkspace(session.staffId);
+      setNotice(`Sync complete. ${result.branches} branch(es) and ${result.staff} staff account(s) are in the cloud snapshot.`);
+    } catch (e) { setError(String(e).replace(/^Error: /, '')); }
+    finally { setSyncing(false); }
+  }
+
   async function submitLogin(event: FormEvent) {
     event.preventDefault(); setError(''); setBusy(true);
     try {
@@ -65,6 +125,8 @@ export default function DesktopApp() {
         : await invoke<StaffSession>('login_staff', { username, password });
       setSession(result); setPassword('');
       setStatus(await invoke<LocalStatus>('get_local_status'));
+      const sync = await invoke<SyncStatus>('get_device_sync_status'); setSyncStatus(sync);
+      if (sync.paired && navigator.onLine) { try { const result = await invoke<SyncResult>('sync_desktop_workspace'); setSyncStatus({ ...sync, lastSyncAt: result.updatedAt }); } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); } }
     } catch (reason) { setError(String(reason).replace(/^Error: /, '')); }
     finally { setBusy(false); }
   }
@@ -74,7 +136,8 @@ export default function DesktopApp() {
     setBusy(true); setError(''); setNotice('');
     try {
       await invoke('save_business_profile', { actorId: session.staffId, name: business.name, phone: business.phone || null, email: business.email || null, address: business.address || null, logoDataUrl: business.logoDataUrl || null, currency: business.currency, timezone: business.timezone });
-      setNotice('Business profile saved on this computer.');
+      await syncIfPaired();
+      setNotice('Business profile saved on this computer' + (syncStatus.paired ? ' and synchronised.' : '.'));
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
@@ -83,7 +146,7 @@ export default function DesktopApp() {
     setBusy(true); setError(''); setNotice('');
     try {
       await invoke<Branch>('create_branch', { actorId: session.staffId, name: branchName, code: branchCode });
-      setBranchName(''); setBranchCode(''); await refreshWorkspace(session.staffId); setNotice('Branch created successfully.');
+      setBranchName(''); setBranchCode(''); await syncIfPaired(); await refreshWorkspace(session.staffId); setNotice('Branch created successfully.');
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
@@ -92,7 +155,7 @@ export default function DesktopApp() {
     setBusy(true); setError(''); setNotice(''); setCredentials(null);
     try {
       const result = await invoke<{ username: string; temporaryPassword: string }>('create_staff', { actorId: session.staffId, displayName: newStaffName, role: newStaffRole, branchId: newStaffBranch || null });
-      setCredentials(result); setNewStaffName(''); await refreshWorkspace(session.staffId); setNotice('Staff account created. Copy the temporary password now; it will not be shown again.');
+      setCredentials(result); setNewStaffName(''); await syncIfPaired(); await refreshWorkspace(session.staffId); setNotice('Staff account created. Copy the temporary password now; it will not be shown again.');
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
@@ -110,7 +173,17 @@ export default function DesktopApp() {
         <label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete={status.setupRequired?'new-password':'current-password'} required minLength={status.setupRequired?12:1} maxLength={128}/>{status.setupRequired&&<small>Use at least 12 characters.</small>}</label>
         {error&&<p className="error" role="alert">{error}</p>}
         <button className="primary" type="submit" disabled={busy}>{busy?'Please wait…':status.setupRequired?'Create owner account':'Sign in'}</button>
-      </form><div className="footnote">Device ID: {status.deviceId}</div>
+      </form>
+      <div className="pair-device-card">
+        <h2>Already have a business?</h2>
+        <p>Pair this computer using the one-time code generated in the online owner portal. This is recommended for additional computers; staff accounts will be downloaded for offline sign-in.</p>
+        <form onSubmit={pairThisComputer}>
+          <label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label>
+          <button className="secondary" type="submit" disabled={syncing || pairingCode.length!==8 || !online}>{syncing?'Pairing and syncing…':'Pair this computer'}</button>
+        </form>
+        {syncStatus.paired&&<button className="secondary" onClick={syncNow} disabled={syncing || !online}>{syncing?'Syncing…':'Sync now'}</button>}
+      </div>
+      <div className="footnote">Device ID: {status.deviceId}</div>
     </section></main>
   );
 
@@ -144,7 +217,12 @@ export default function DesktopApp() {
       {tab==='staff'&&<><div className="content-card"><div className="section-heading"><div><h2>Create a staff account</h2><p>A temporary password is generated automatically. Staff must change it after their first sign-in once password-change support is enabled.</p></div></div><form className="form-grid" onSubmit={addStaff}><label className="wide">Staff member's full name<input value={newStaffName} onChange={e=>setNewStaffName(e.target.value)} required minLength={2} maxLength={100} placeholder="Enter full name"/></label><label>Role<select value={newStaffRole} onChange={e=>setNewStaffRole(e.target.value)}><option>Cashier</option><option>Storekeeper</option><option>Manager</option><option>Accountant</option><option>Supervisor</option></select></label><label>Assigned branch<select value={newStaffBranch} onChange={e=>setNewStaffBranch(e.target.value)}><option value="">No branch assigned</option>{branches.map(b=><option key={b.id} value={b.id}>{b.name} ({b.code})</option>)}</select></label><div className="wide form-actions"><button className="primary" disabled={busy}>Generate staff credentials</button></div></form>
         {credentials&&<div className="credential-box"><h3>New staff login credentials</h3><p>Share these details securely with the staff member. The temporary password is displayed only this once.</p><div className="credential-line"><span>Username</span><strong>{credentials.username}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.username)}>Copy</button></div><div className="credential-line"><span>Temporary password</span><strong>{credentials.temporaryPassword}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.temporaryPassword)}>Copy</button></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(`Username: ${credentials.username}\nTemporary password: ${credentials.temporaryPassword}`)}>Copy both credentials</button></div>}
       </div><div className="content-card"><div className="section-heading"><div><h2>Staff accounts</h2><p>{staff.length} account(s) stored on this computer.</p></div></div>{staff.length===0?<Empty text="No staff accounts have been created yet."/>:<DataTable headers={['Name','Username','Role','Status']} rows={staff.map(s=>[s.displayName,s.username,s.role,s.status])}/>}</div></>}
-      {tab==='devices'&&<div className="content-card"><div className="section-heading"><div><h2>Computer devices</h2><p>Device records currently stored in this computer's local database. Cross-device authorisation and cloud synchronisation are a subsequent implementation step.</p></div></div><DataTable headers={['Device','Type','Status','Last seen']} rows={devices.map(d=>[d.deviceName,d.deviceType,d.status,d.lastSeenAt])}/><div className="device-id">This computer ID: {status.deviceId}</div></div>}
+      {tab==='devices'&&<div className="content-card"><div className="section-heading"><div><h2>Computer devices</h2><p>Pair this computer with the online owner portal to synchronise business setup and staff password hashes securely.</p></div></div>
+        <div className="device-sync-status"><strong>{syncStatus.paired?'Paired with owner portal':'Not yet paired'}</strong><span>{syncStatus.paired?(syncStatus.ownerDevice?'Primary owner computer':'Additional business computer'):'Generate a pairing code in the online owner portal.'}</span><small>Last successful sync: {syncStatus.lastSyncAt?new Date(syncStatus.lastSyncAt).toLocaleString():'Not yet synchronised'}</small></div>
+        {!syncStatus.paired&&<form className="inline-form" onSubmit={pairThisComputer}><label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label><button className="primary" disabled={busy||syncing||pairingCode.length!==8||!online}>Pair this computer</button></form>}
+        {syncStatus.paired&&<button className="primary" onClick={syncNow} disabled={syncing||!online}>{syncing?'Synchronising…':'Sync now'}</button>}
+        <div className="device-id">This computer ID: {status.deviceId}</div>
+      </div>}
       <footer className="app-footer">Local database · Schema v{status.schemaVersion} <span>Changes are currently saved on this computer.</span></footer>
       </>}
     </section>
