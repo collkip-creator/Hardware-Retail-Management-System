@@ -1,20 +1,13 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
-type LocalStatus = {
-  setupRequired: boolean;
-  deviceId: string;
-  staffCount: number;
-  schemaVersion: number;
-};
-
-type StaffSession = {
-  staffId: string;
-  username: string;
-  displayName: string;
-  role: string;
-  branchId: string | null;
-};
+type LocalStatus = { setupRequired: boolean; deviceId: string; staffCount: number; schemaVersion: number };
+type StaffSession = { staffId: string; username: string; displayName: string; role: string; branchId: string | null; mustChangePassword?: boolean };
+type BusinessProfile = { id: string; name: string; currency: string; timezone: string; phone: string | null; email: string | null; address: string | null; logoDataUrl: string | null };
+type Branch = { id: string; name: string; code: string | null; status: string };
+type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
+type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
+type Tab = 'overview' | 'business' | 'branches' | 'staff' | 'devices';
 
 export default function DesktopApp() {
   const [status, setStatus] = useState<LocalStatus | null>(null);
@@ -22,169 +15,138 @@ export default function DesktopApp() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [online, setOnline] = useState(navigator.onLine);
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [tab, setTab] = useState<Tab>('overview');
+  const [business, setBusiness] = useState<BusinessProfile | null>(null);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [staff, setStaff] = useState<Staff[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [branchName, setBranchName] = useState('');
+  const [branchCode, setBranchCode] = useState('');
+  const [newStaffName, setNewStaffName] = useState('');
+  const [newStaffRole, setNewStaffRole] = useState('Cashier');
+  const [newStaffBranch, setNewStaffBranch] = useState('');
+  const [credentials, setCredentials] = useState<{ username: string; temporaryPassword: string } | null>(null);
 
   useEffect(() => {
-    invoke<LocalStatus>('get_local_status')
-      .then(setStatus)
-      .catch((reason) => setError(String(reason)))
-      .finally(() => setLoading(false));
-
-    const onOnline = () => setOnline(true);
-    const onOffline = () => setOnline(false);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    return () => {
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-    };
+    invoke<LocalStatus>('get_local_status').then(setStatus).catch((e) => setError(String(e))).finally(() => setLoading(false));
+    const onOnline = () => setOnline(true), onOffline = () => setOnline(false);
+    window.addEventListener('online', onOnline); window.addEventListener('offline', onOffline);
+    return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline); };
   }, []);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setError('');
-    setBusy(true);
+  async function refreshWorkspace(actorId: string) {
+    const [profile, branchRows, staffRows, deviceRows, localStatus] = await Promise.all([
+      invoke<BusinessProfile>('get_business_profile', { actorId }),
+      invoke<Branch[]>('list_branches', { actorId }),
+      invoke<Staff[]>('list_staff', { actorId }),
+      invoke<Device[]>('list_devices', { actorId }),
+      invoke<LocalStatus>('get_local_status'),
+    ]);
+    setBusiness(profile); setBranches(branchRows); setStaff(staffRows); setDevices(deviceRows); setStatus(localStatus);
+  }
+
+  useEffect(() => {
+    if (session?.role === 'Business Owner') refreshWorkspace(session.staffId).catch((e) => setError(String(e)));
+  }, [session?.staffId]);
+
+  async function submitLogin(event: FormEvent) {
+    event.preventDefault(); setError(''); setBusy(true);
     try {
       const result = status?.setupRequired
-        ? await invoke<StaffSession>('setup_owner', {
-            displayName,
-            username,
-            password,
-          })
-        : await invoke<StaffSession>('login_staff', {
-            username,
-            password,
-          });
-      setSession(result);
-      setPassword('');
-      const refreshed = await invoke<LocalStatus>('get_local_status');
-      setStatus(refreshed);
-    } catch (reason) {
-      setError(String(reason).replace(/^Error: /, ''));
-    } finally {
-      setBusy(false);
-    }
+        ? await invoke<StaffSession>('setup_owner', { displayName, username, password })
+        : await invoke<StaffSession>('login_staff', { username, password });
+      setSession(result); setPassword('');
+      setStatus(await invoke<LocalStatus>('get_local_status'));
+    } catch (reason) { setError(String(reason).replace(/^Error: /, '')); }
+    finally { setBusy(false); }
   }
 
-  if (loading) {
-    return <main className="screen"><div className="loading">Preparing your local workspace…</div></main>;
+  async function saveBusiness(event: FormEvent) {
+    event.preventDefault(); if (!session || !business) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await invoke('save_business_profile', { actorId: session.staffId, name: business.name, phone: business.phone || null, email: business.email || null, address: business.address || null, currency: business.currency, timezone: business.timezone });
+      setNotice('Business profile saved on this computer.');
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
-  if (!status) {
-    return (
-      <main className="screen">
-        <section className="panel narrow">
-          <Brand />
-          <h1>Unable to open local workspace</h1>
-          <p className="muted">The local database could not be initialised. Your existing cloud workspace has not been changed.</p>
-          {error && <p className="error">{error}</p>}
-          <button className="primary" onClick={() => window.location.reload()}>Try again</button>
-        </section>
-      </main>
-    );
+  async function addBranch(event: FormEvent) {
+    event.preventDefault(); if (!session) return;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      await invoke<Branch>('create_branch', { actorId: session.staffId, name: branchName, code: branchCode });
+      setBranchName(''); setBranchCode(''); await refreshWorkspace(session.staffId); setNotice('Branch created successfully.');
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
-  if (!session) {
-    return (
-      <main className="screen">
-        <section className="panel narrow">
-          <Brand />
-          <div className="status-line">
-            <span className={online ? 'dot online' : 'dot offline'} />
-            {online ? 'Internet available' : 'Offline mode'}
-            <span className="status-separator">·</span>
-            Local database ready
-          </div>
-          <h1>{status.setupRequired ? 'Set up this computer' : 'Sign in to your business'}</h1>
-          <p className="muted">
-            {status.setupRequired
-              ? 'Create the first Business Owner account. This account is stored securely on this computer.'
-              : 'Use your local staff username and password. Internet access is not required for staff sign-in once their account is on this computer.'}
-          </p>
-          <form onSubmit={submit}>
-            {status.setupRequired && (
-              <label>
-                Your name
-                <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" required minLength={2} maxLength={100} />
-              </label>
-            )}
-            <label>
-              Username
-              <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required minLength={3} maxLength={40} />
-            </label>
-            <label>
-              Password
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={status.setupRequired ? 'new-password' : 'current-password'} required minLength={status.setupRequired ? 12 : 1} maxLength={128} />
-              {status.setupRequired && <small>Use at least 12 characters.</small>}
-            </label>
-            {error && <p className="error" role="alert">{error}</p>}
-            <button className="primary" type="submit" disabled={busy}>
-              {busy ? 'Please wait…' : status.setupRequired ? 'Create owner account' : 'Sign in'}
-            </button>
-          </form>
-          <div className="footnote">Device ID: {status.deviceId.slice(0, 8)}…</div>
-        </section>
-      </main>
-    );
+  async function addStaff(event: FormEvent) {
+    event.preventDefault(); if (!session) return;
+    setBusy(true); setError(''); setNotice(''); setCredentials(null);
+    try {
+      const result = await invoke<{ username: string; temporaryPassword: string }>('create_staff', { actorId: session.staffId, displayName: newStaffName, role: newStaffRole, branchId: newStaffBranch || null });
+      setCredentials(result); setNewStaffName(''); await refreshWorkspace(session.staffId); setNotice('Staff account created. Copy the temporary password now; it will not be shown again.');
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }
 
-  return (
-    <main className="screen">
-      <section className="workspace">
-        <header className="topbar">
-          <Brand compact />
-          <div className="top-actions">
-            <span className="status-line"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Online' : 'Offline'}</span>
-            <button className="secondary" onClick={() => setSession(null)}>Sign out</button>
-          </div>
-        </header>
-        <div className="welcome">
-          <p className="eyebrow">LOCAL DESKTOP WORKSPACE</p>
-          <h1>Welcome, {session.displayName}</h1>
-          <p className="muted">{session.role} · Signed in on this computer</p>
-        </div>
-        <div className="grid">
-          <article className="info-card">
-            <span className="card-label">Local database</span>
-            <strong>Ready</strong>
-            <p>SQLite database created and stored on this computer.</p>
-          </article>
-          <article className="info-card">
-            <span className="card-label">Staff accounts</span>
-            <strong>{status.staffCount}</strong>
-            <p>Local account records available on this device.</p>
-          </article>
-          <article className="info-card">
-            <span className="card-label">Synchronisation</span>
-            <strong>Foundation ready</strong>
-            <p>Local sync queue and device identity tables are in place. Network sync will be connected in a later step.</p>
-          </article>
-        </div>
-        <section className="notice">
-          <h2>Desktop foundation installed</h2>
-          <p>This first build establishes the Windows shell, local database, and offline-capable staff sign-in. The POS, stock, purchasing, and accounting workflows are being migrated onto this local data layer in the next stages.</p>
-          <p className="muted">Your existing AppDeploy browser application remains separate and unchanged.</p>
-        </section>
-        <footer className="workspace-footer">
-          <span>Device: {status.deviceId}</span>
-          <span>Database schema v{status.schemaVersion}</span>
-        </footer>
-      </section>
-    </main>
+  if (loading) return <main className="screen"><div className="loading">Preparing your local workspace…</div></main>;
+  if (!status) return <main className="screen"><section className="panel narrow"><Brand /><h1>Unable to open local workspace</h1><p className="muted">The local database could not be initialised. Your existing cloud workspace has not been changed.</p><p className="error">{error}</p><button className="primary" onClick={() => window.location.reload()}>Try again</button></section></main>;
+
+  if (!session) return (
+    <main className="screen"><section className="panel narrow"><Brand />
+      <div className="status-line"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Internet available' : 'Offline mode'} <span>· Local database ready</span></div>
+      <h1>{status.setupRequired ? 'Set up this computer' : 'Sign in to your business'}</h1>
+      <p className="muted">{status.setupRequired ? 'Create the first Business Owner account. Your account is stored securely on this computer.' : 'Sign in using your local staff username and password. Offline sign-in is supported after the account is registered on this computer.'}</p>
+      <form onSubmit={submitLogin}>
+        {status.setupRequired && <label>Your name<input value={displayName} onChange={e=>setDisplayName(e.target.value)} autoComplete="name" required minLength={2} maxLength={100}/></label>}
+        <label>Username<input value={username} onChange={e=>setUsername(e.target.value)} autoComplete="username" required minLength={3} maxLength={40}/></label>
+        <label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} autoComplete={status.setupRequired?'new-password':'current-password'} required minLength={status.setupRequired?12:1} maxLength={128}/>{status.setupRequired&&<small>Use at least 12 characters.</small>}</label>
+        {error&&<p className="error" role="alert">{error}</p>}
+        <button className="primary" type="submit" disabled={busy}>{busy?'Please wait…':status.setupRequired?'Create owner account':'Sign in'}</button>
+      </form><div className="footnote">Device ID: {status.deviceId}</div>
+    </section></main>
   );
+
+  if (session.role !== 'Business Owner') return <main className="screen"><section className="panel narrow"><Brand/><h1>Welcome, {session.displayName}</h1><p className="muted">Your staff workspace will be enabled in the next desktop module release.</p><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
+
+  const updateBusiness = (key: keyof BusinessProfile, value: string) => setBusiness(current => current ? { ...current, [key]: value } : current);
+  const nav: { id: Tab; label: string; icon: string }[] = [
+    {id:'overview',label:'Overview',icon:'⌂'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
+  ];
+
+  return <main className="app-shell">
+    <aside className="sidebar"><Brand compact/><div className="side-caption">OWNER WORKSPACE</div>
+      {nav.map(item=><button key={item.id} className={tab===item.id?'nav-item active':'nav-item'} onClick={()=>{setTab(item.id);setError('');setNotice('');}}><span>{item.icon}</span>{item.label}</button>)}
+      <div className="side-bottom"><span className={online?'dot online':'dot offline'}/>{online?'Internet available':'Offline mode'}<small>Device {status.deviceId.slice(0,8)}…</small><button className="secondary signout" onClick={()=>setSession(null)}>Sign out</button></div>
+    </aside>
+    <section className="main-area"><header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{nav.find(n=>n.id===tab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0,1).toUpperCase()}</span><span>{session.displayName}<small>Business Owner</small></span></div></header>
+      {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
+      {!business?<div className="panel"><p>Loading your business workspace…</p></div>:<>
+      {tab==='overview'&&<><div className="welcome-card"><div><p className="eyebrow">YOUR BUSINESS WORKSPACE</p><h2>{business.name}</h2><p>Manage your business details, branches, staff accounts and authorised computers from one place.</p></div><div className="welcome-mark">HR</div></div>
+        <div className="metric-grid"><Metric label="Branches" value={branches.length} hint="Registered locations"/><Metric label="Staff accounts" value={staff.length} hint="Local accounts on this device"/><Metric label="Authorised devices" value={devices.length} hint="Device records on this computer"/></div>
+        <div className="section-heading"><div><h2>Getting started</h2><p>Complete these setup steps before daily operations.</p></div></div>
+        <div className="setup-list"><SetupStep done={business.name!==`${session.displayName}'s Business`} title="Complete business profile" detail="Add your trading name and contact information" onClick={()=>setTab('business')}/><SetupStep done={branches.length>0} title="Register your first branch" detail="Create the main store or first outlet" onClick={()=>setTab('branches')}/><SetupStep done={staff.length>1} title="Add your team" detail="Create staff logins and assign their roles" onClick={()=>setTab('staff')}/></div>
+      </>}
+      {tab==='business'&&business&&<div className="content-card"><div className="section-heading"><div><h2>Business details</h2><p>These details identify your business in the desktop workspace.</p></div></div>
+        <form className="form-grid" onSubmit={saveBusiness}><label className="wide">Business / trading name<input value={business.name} onChange={e=>updateBusiness('name',e.target.value)} required minLength={2} maxLength={120}/></label><label>Phone number<input value={business.phone||''} onChange={e=>updateBusiness('phone',e.target.value)} placeholder="+254…"/></label><label>Email address<input type="email" value={business.email||''} onChange={e=>updateBusiness('email',e.target.value)} placeholder="name@business.co.ke"/></label><label className="wide">Business address<textarea value={business.address||''} onChange={e=>updateBusiness('address',e.target.value)} rows={3}/></label><label>Currency<select value={business.currency} onChange={e=>updateBusiness('currency',e.target.value)}><option value="KES">KES — Kenyan Shilling</option><option value="USD">USD — US Dollar</option><option value="UGX">UGX — Uganda Shilling</option><option value="TZS">TZS — Tanzania Shilling</option></select></label><label>Time zone<input value={business.timezone} onChange={e=>updateBusiness('timezone',e.target.value)} required/></label><div className="wide form-actions"><button className="primary" disabled={busy}>Save business profile</button></div></form>
+      </div>}
+      {tab==='branches'&&<><div className="content-card"><div className="section-heading"><div><h2>Add a branch</h2><p>Create the main store or another business location.</p></div></div><form className="inline-form" onSubmit={addBranch}><label>Branch name<input value={branchName} onChange={e=>setBranchName(e.target.value)} placeholder="e.g. Nakuru Main Store" required minLength={2}/></label><label>Branch code<input value={branchCode} onChange={e=>setBranchCode(e.target.value.toUpperCase())} placeholder="e.g. NKR01" required minLength={2} maxLength={12}/></label><button className="primary" disabled={busy}>Add branch</button></form></div><div className="content-card"><div className="section-heading"><div><h2>Registered branches</h2><p>{branches.length} branch(es) registered locally.</p></div></div>{branches.length===0?<Empty text="No branches yet. Add your first branch above."/>:<DataTable headers={['Branch name','Branch code','Status']} rows={branches.map(b=>[b.name,b.code||'—',b.status])}/>}</div></>}
+      {tab==='staff'&&<><div className="content-card"><div className="section-heading"><div><h2>Create a staff account</h2><p>A temporary password is generated automatically. Staff must change it after their first sign-in once password-change support is enabled.</p></div></div><form className="form-grid" onSubmit={addStaff}><label className="wide">Staff member's full name<input value={newStaffName} onChange={e=>setNewStaffName(e.target.value)} required minLength={2} maxLength={100} placeholder="Enter full name"/></label><label>Role<select value={newStaffRole} onChange={e=>setNewStaffRole(e.target.value)}><option>Cashier</option><option>Storekeeper</option><option>Manager</option><option>Accountant</option><option>Supervisor</option></select></label><label>Assigned branch<select value={newStaffBranch} onChange={e=>setNewStaffBranch(e.target.value)}><option value="">No branch assigned</option>{branches.map(b=><option key={b.id} value={b.id}>{b.name} ({b.code})</option>)}</select></label><div className="wide form-actions"><button className="primary" disabled={busy}>Generate staff credentials</button></div></form>
+        {credentials&&<div className="credential-box"><h3>New staff login credentials</h3><p>Share these details securely with the staff member. The temporary password is displayed only this once.</p><div className="credential-line"><span>Username</span><strong>{credentials.username}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.username)}>Copy</button></div><div className="credential-line"><span>Temporary password</span><strong>{credentials.temporaryPassword}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.temporaryPassword)}>Copy</button></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(`Username: ${credentials.username}\nTemporary password: ${credentials.temporaryPassword}`)}>Copy both credentials</button></div>}
+      </div><div className="content-card"><div className="section-heading"><div><h2>Staff accounts</h2><p>{staff.length} account(s) stored on this computer.</p></div></div>{staff.length===0?<Empty text="No staff accounts have been created yet."/>:<DataTable headers={['Name','Username','Role','Status']} rows={staff.map(s=>[s.displayName,s.username,s.role,s.status])}/>}</div></>}
+      {tab==='devices'&&<div className="content-card"><div className="section-heading"><div><h2>Computer devices</h2><p>Device records currently stored in this computer's local database. Cross-device authorisation and cloud synchronisation are a subsequent implementation step.</p></div></div><DataTable headers={['Device','Type','Status','Last seen']} rows={devices.map(d=>[d.deviceName,d.deviceType,d.status,d.lastSeenAt])}/><div className="device-id">This computer ID: {status.deviceId}</div></div>}
+      <footer className="app-footer">Local database · Schema v{status.schemaVersion} <span>Changes are currently saved on this computer.</span></footer>
+      </>}
+    </section>
+  </main>;
 }
 
-function Brand({ compact = false }: { compact?: boolean }) {
-  return (
-    <div className={compact ? 'brand compact' : 'brand'}>
-      <div className="brand-mark">HR</div>
-      <div>
-        <strong>Hardware Retail</strong>
-        <span>Management System</span>
-      </div>
-    </div>
-  );
-}
+function Brand({compact=false}:{compact?:boolean}){return <div className={compact?'brand compact':'brand'}><div className="brand-mark">HR</div><div><strong>Hardware Retail</strong><span>Management System</span></div></div>}
+function Metric({label,value,hint}:{label:string;value:number;hint:string}){return <article className="metric-card"><span>{label}</span><strong>{value}</strong><small>{hint}</small></article>}
+function SetupStep({done,title,detail,onClick}:{done:boolean;title:string;detail:string;onClick:()=>void}){return <button className="setup-step" onClick={onClick}><span className={done?'step-check done':'step-check'}>{done?'✓':'○'}</span><span><strong>{title}</strong><small>{detail}</small></span><span className="step-arrow">›</span></button>}
+function Empty({text}:{text:string}){return <div className="empty-state">{text}</div>}
+function DataTable({headers,rows}:{headers:string[];rows:string[][]}){return <div className="table-wrap"><table><thead><tr>{headers.map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j}>{cell}</td>)}</tr>)}</tbody></table></div>}
