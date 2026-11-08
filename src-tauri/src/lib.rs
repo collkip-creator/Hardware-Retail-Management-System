@@ -343,6 +343,16 @@ fn change_staff_password(database:tauri::State<'_,LocalDatabase>,staff_id:String
     let hash=hash_password(&new_password)?;
     c.execute("UPDATE staff_accounts SET password_hash=?1,must_change_password=0 WHERE id=?2",params![hash,account_id]).map_err(|e|e.to_string())?;
     c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STAFF_PASSWORD_CHANGED','staff_account',?3)",params![Uuid::new_v4().to_string(),staff_id,account_id]).map_err(|e|e.to_string())?;
+    let mut pending: Vec<serde_json::Value> = read_sync_value(&c,"pending_password_sync")?
+        .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    pending.retain(|item| item["staffId"].as_str() != Some(staff_id.as_str()));
+    pending.push(serde_json::json!({
+        "staffId":staff_id,
+        "expectedPasswordHash":stored_hash,
+        "passwordHash":hash
+    }));
+    let pending_json=serde_json::to_string(&pending).map_err(|e|e.to_string())?;
+    write_sync_value(&c,"pending_password_sync",&pending_json)?;
     Ok(())
 }
 
@@ -612,20 +622,45 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
 
 #[tauri::command]
 async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Result<SyncResult, String> {
-    let (token, owner_device, snapshot) = {
+    let (token, owner_device, snapshot, pending_passwords) = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         let token=read_sync_value(&connection,"device_token")?.ok_or_else(||"Pair this computer with the online owner portal first.".to_string())?;
         let owner=read_sync_value(&connection,"owner_device")?.unwrap_or_default()=="true";
         let snapshot=if owner { Some(build_local_snapshot(&connection)?) } else { None };
-        (token,owner,snapshot)
+        let pending: Vec<serde_json::Value> = read_sync_value(&connection,"pending_password_sync")?
+            .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+        (token,owner,snapshot,pending)
     };
     let client=reqwest::Client::new();
+    let mut pending_applied = pending_passwords.is_empty();
+    for change in &pending_passwords {
+        let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/password")).bearer_auth(&token)
+            .json(change).send().await.map_err(|e|format!("Could not synchronise the staff password change: {e}"))?;
+        let status=response.status();
+        let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+        if status.is_success() {
+            pending_applied = true;
+        } else if !(owner_device && status == reqwest::StatusCode::CONFLICT) {
+            return Err(body["error"].as_str().unwrap_or("The staff password change could not be synchronised.").to_string());
+        }
+    }
+    let mut push_snapshot: Option<serde_json::Value> = None;
     if let Some(snapshot)=snapshot {
         let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/push")).bearer_auth(&token)
             .json(&serde_json::json!({"snapshot":snapshot})).send().await
             .map_err(|e|format!("Could not upload this computer's changes: {e}"))?;
         let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
         if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Cloud upload failed.").to_string());}
+        push_snapshot=body.get("snapshot").cloned();
+        pending_applied = true;
+    }
+    if pending_applied && !pending_passwords.is_empty() {
+        let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+        write_sync_value(&connection,"pending_password_sync","[]")?;
+    }
+    if let Some(remote) = push_snapshot {
+        let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+        apply_remote_snapshot(&mut connection,&remote)?;
     }
     let response=client.get(format!("{DESKTOP_API_BASE}/desktop/sync/pull")).bearer_auth(&token).send().await
         .map_err(|e|format!("Could not download the latest business data: {e}"))?;
