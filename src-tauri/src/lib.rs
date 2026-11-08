@@ -284,7 +284,7 @@ fn login_staff(
 ) -> Result<StaffSession, String> {
     let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
     let record = connection.query_row(
-        "SELECT a.id, a.username, a.password_hash, a.status, p.id, p.display_name, p.role, p.branch_id, p.status
+        "SELECT a.id, a.username, a.password_hash, a.status, p.id, p.display_name, p.role, p.branch_id, p.status, a.must_change_password
          FROM staff_accounts a
          JOIN staff_profiles p ON p.id = a.staff_profile_id
          WHERE a.username = ?1 COLLATE NOCASE",
@@ -299,10 +299,11 @@ fn login_staff(
             row.get::<_, String>(6)?,
             row.get::<_, Option<String>>(7)?,
             row.get::<_, String>(8)?,
+            row.get::<_, i64>(9)?,
         )),
     ).optional().map_err(|e| e.to_string())?;
 
-    let (account_id, canonical_username, password_hash, account_status, staff_id, display_name, role, branch_id, profile_status) =
+    let (account_id, canonical_username, password_hash, account_status, staff_id, display_name, role, branch_id, profile_status, must_change_password) =
         record.ok_or_else(|| "Incorrect username or password.".to_string())?;
 
     if account_status != "active" || profile_status != "active" {
@@ -327,10 +328,23 @@ fn login_staff(
         display_name,
         role,
         branch_id,
-        must_change_password: false,
+        must_change_password: must_change_password == 1,
     })
 }
 
+
+
+#[tauri::command]
+fn change_staff_password(database:tauri::State<'_,LocalDatabase>,staff_id:String,current_password:String,new_password:String)->Result<(),String>{
+    if new_password.len()<12 || new_password.len()>128 { return Err("New password must be between 12 and 128 characters.".into()); }
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (account_id,stored_hash):(String,String)=c.query_row("SELECT id,password_hash FROM staff_accounts WHERE staff_profile_id=?1 AND status='active'",[&staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Staff account not found.".to_string())?;
+    if !verify_password(&current_password,&stored_hash)? { return Err("Current password is incorrect.".into()); }
+    let hash=hash_password(&new_password)?;
+    c.execute("UPDATE staff_accounts SET password_hash=?1,must_change_password=0 WHERE id=?2",params![hash,account_id]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STAFF_PASSWORD_CHANGED','staff_account',?3)",params![Uuid::new_v4().to_string(),staff_id,account_id]).map_err(|e|e.to_string())?;
+    Ok(())
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -456,7 +470,8 @@ pub fn run() {
             create_branch,
             list_staff,
             create_staff,
-            list_devices
+            list_devices,
+            change_staff_password
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
