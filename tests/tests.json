@@ -1,0 +1,58 @@
+[
+  {
+    "name": "Post dated opening balances and calculate owner's equity",
+    "sanity": true,
+    "viewport": "desktop",
+    "covers": [
+      "opening balance date",
+      "asset debit balances",
+      "liability credit balances",
+      "automatic owner equity balancing",
+      "balanced opening journal",
+      "duplicate opening balance prevention",
+      "opening balance persistence"
+    ],
+    "description": "Verifies a business can enter its starting asset and liability balances once, and the system posts a balanced journal with calculated owner's equity.",
+    "steps": [
+      "Open Accounting and enter an opening date",
+      "Enter Cash on Hand of 50000, M-Pesa Wallet of 20000, Inventory Asset of 500000 and Accounts Payable of 100000",
+      "Post opening balances",
+      "Review the posted opening journal and balance sheet"
+    ],
+    "expected": "The opening journal is dated as selected, debits total KSh 570000, credits total KSh 570000 including calculated owner equity of KSh 470000, and the form is locked against a second posting."
+  },
+  {
+    "name": "Reject invalid or repeated opening balances",
+    "viewport": "desktop",
+    "covers": [
+      "negative opening amount validation",
+      "duplicate account validation",
+      "zero balance validation",
+      "one-time opening journal lock"
+    ],
+    "description": "Verifies invalid amounts and a second opening balance submission are rejected without creating duplicate opening journals.",
+    "steps": [
+      "Open the opening balance form",
+      "Try entering a negative amount or submit with no non-zero balances",
+      "After a valid opening journal exists, attempt another opening balance submission"
+    ],
+    "expected": "Invalid data is rejected with a visible message, and the business can have only one opening-balance journal."
+  },
+  {
+    "name": "Confirm opening balance entry is usable on mobile",
+    "viewport": "mobile",
+    "covers": [
+      "mobile opening balance form",
+      "readable account labels",
+      "opening amount entry",
+      "responsive opening journal summary"
+    ],
+    "description": "Verifies the opening balance form can be completed and reviewed on a mobile viewport.",
+    "steps": [
+      "Open Accounting on a mobile viewport before opening balances have been posted",
+      "Enter an opening date and two or more account balances",
+      "Review the calculated owner's equity and submit"
+    ],
+    "expected": "Account labels and amount inputs remain usable on mobile and the calculated equity is visible before posting."
+  }
+]
