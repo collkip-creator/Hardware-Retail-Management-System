@@ -217,6 +217,12 @@ export const handler = router({
       if (devices.items.some((item: any) => item.deviceId === deviceId && item.status === 'active')) {
         return error('This computer is already registered. Use its existing installation or revoke its previous registration.', 409);
       }
+      const [claimed] = await db.tx.update(desktopPairingTable, [{
+        id: pairing.id,
+        record: { claimedAt: new Date().toISOString(), status: 'claimed', claimedDeviceId: deviceId },
+        if: { status: 'pending' },
+      }], { patch: true });
+      if (!claimed) return error('This pairing code has already been claimed. Generate a new code.', 409);
       const token = randomHex(32);
       const tokenHash = await sha256(token);
       const device = {
@@ -240,12 +246,6 @@ export const handler = router({
         createdAt: new Date().toISOString(),
       }]);
       if (!tokenId) return error('A secure device credential could not be issued.', 500);
-      const [claimed] = await db.tx.update(desktopPairingTable, [{
-        id: pairing.id,
-        record: { claimedAt: new Date().toISOString(), status: 'claimed', claimedDeviceId: deviceId },
-        if: { status: 'pending' },
-      }], { patch: true });
-      if (!claimed) return error('This pairing code has already been claimed. Generate a new code.', 409);
       return json({ deviceToken: token, ownerDevice: device.ownerDevice, deviceId });
     },
   ],
