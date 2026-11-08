@@ -178,7 +178,7 @@ export default function DesktopApp() {
         <h2>Already have a business?</h2>
         <p>Pair this computer using the one-time code generated in the online owner portal. This is recommended for additional computers; staff accounts will be downloaded for offline sign-in.</p>
         <form onSubmit={pairThisComputer}>
-          <label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label>
+          <label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label>
           <button className="secondary" type="submit" disabled={syncing || pairingCode.length!==8 || !online}>{syncing?'Pairing and syncing…':'Pair this computer'}</button>
         </form>
         {syncStatus.paired&&<button className="secondary" onClick={syncNow} disabled={syncing || !online}>{syncing?'Syncing…':'Sync now'}</button>}
@@ -219,7 +219,7 @@ export default function DesktopApp() {
       </div><div className="content-card"><div className="section-heading"><div><h2>Staff accounts</h2><p>{staff.length} account(s) stored on this computer.</p></div></div>{staff.length===0?<Empty text="No staff accounts have been created yet."/>:<DataTable headers={['Name','Username','Role','Status']} rows={staff.map(s=>[s.displayName,s.username,s.role,s.status])}/>}</div></>}
       {tab==='devices'&&<div className="content-card"><div className="section-heading"><div><h2>Computer devices</h2><p>Pair this computer with the online owner portal to synchronise business setup and staff password hashes securely.</p></div></div>
         <div className="device-sync-status"><strong>{syncStatus.paired?'Paired with owner portal':'Not yet paired'}</strong><span>{syncStatus.paired?(syncStatus.ownerDevice?'Primary owner computer':'Additional business computer'):'Generate a pairing code in the online owner portal.'}</span><small>Last successful sync: {syncStatus.lastSyncAt?new Date(syncStatus.lastSyncAt).toLocaleString():'Not yet synchronised'}</small></div>
-        {!syncStatus.paired&&<form className="inline-form" onSubmit={pairThisComputer}><label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label><button className="primary" disabled={busy||syncing||pairingCode.length!==8||!online}>Pair this computer</button></form>}
+        {!syncStatus.paired&&<form className="inline-form" onSubmit={pairThisComputer}><label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label><button className="primary" disabled={busy||syncing||pairingCode.length!==8||!online}>Pair this computer</button></form>}
         {syncStatus.paired&&<button className="primary" onClick={syncNow} disabled={syncing||!online}>{syncing?'Synchronising…':'Sync now'}</button>}
         <div className="device-id">This computer ID: {status.deviceId}</div>
       </div>}
