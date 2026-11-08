@@ -571,7 +571,7 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
     let mut local_staff_statement=connection.prepare("SELECT staff_profile_id FROM staff_accounts").map_err(|e|e.to_string())?;
     let local_staff_ids=local_staff_statement.query_map([],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?
         .collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    if local_staff_ids.iter().any(|id| !remote_staff_ids.iter().any(|remote_id| *remote_id == id)) {
+    if local_staff_ids.iter().any(|id| !remote_staff_ids.contains(&id.as_str())) {
         return Err("This computer already has a different local owner or staff account. Pairing cannot overwrite it. Use a clean Windows installation or contact support.".into());
     }
     let tx=connection.transaction().map_err(|e|e.to_string())?;
