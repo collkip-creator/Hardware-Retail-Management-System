@@ -9,6 +9,7 @@ on:
       - "src/desktop/**"
       - "src-tauri/**"
       - "desktop.html"
+      - "desktop/**"
       - "package.json"
       - "package-lock.json"
       - "vite.desktop.config.ts"
