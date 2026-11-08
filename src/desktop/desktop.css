@@ -158,3 +158,10 @@ td { color:#3d4d42; }
  .app-footer { flex-direction:column; }
  .app-footer span { text-align:left; }
 }
+
+.logo-upload { display:flex; align-items:center; gap:16px; padding:15px; border:1px dashed #d5e2d8; border-radius:11px; background:#fafcfa; }
+.logo-preview { width:72px; height:72px; border-radius:11px; border:1px solid #e0e8e1; background:#fff; display:grid; place-items:center; color:#9aaa9f; font-size:12px; font-weight:800; flex:none; overflow:hidden; }
+.logo-preview img { width:100%; height:100%; object-fit:contain; }
+.logo-upload label { flex:1; }
+.logo-upload input[type=file] { border:0; padding:5px 0; font-size:11px; }
+@media(max-width:600px) { .logo-upload { align-items:flex-start; flex-wrap:wrap; } }
