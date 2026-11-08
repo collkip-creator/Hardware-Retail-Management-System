@@ -28,6 +28,7 @@ struct StaffSession {
     display_name: String,
     role: String,
     branch_id: Option<String>,
+    must_change_password: bool,
 }
 
 fn database_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -135,6 +136,50 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         [],
     ).map_err(|e| e.to_string())?;
 
+    // Additive migrations keep existing installed databases intact.
+    for (column, definition) in [
+        ("phone", "TEXT"),
+        ("email", "TEXT"),
+        ("address", "TEXT"),
+        ("logo_data_url", "TEXT"),
+    ] {
+        let exists: bool = connection
+            .prepare("PRAGMA table_info(businesses)")
+            .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(1)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .any(|name| name == column);
+        if !exists {
+            connection.execute_batch(&format!("ALTER TABLE businesses ADD COLUMN {column} {definition};"))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    let staff_columns: Vec<String> = connection
+        .prepare("PRAGMA table_info(staff_accounts)")
+        .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(1)).map(|rows| rows.filter_map(Result::ok).collect()))
+        .map_err(|e| e.to_string())?;
+    if !staff_columns.iter().any(|c| c == "must_change_password") {
+        connection.execute_batch("ALTER TABLE staff_accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;")
+            .map_err(|e| e.to_string())?;
+    }
+    connection.execute_batch("
+        CREATE TABLE IF NOT EXISTS devices (
+            id TEXT PRIMARY KEY,
+            device_name TEXT NOT NULL,
+            device_type TEXT NOT NULL DEFAULT 'Windows desktop',
+            status TEXT NOT NULL DEFAULT 'active',
+            last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    " ).map_err(|e| e.to_string())?;
+    let device_id: String = connection.query_row("SELECT value FROM app_meta WHERE key='device_id'", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    connection.execute(
+        "INSERT OR IGNORE INTO devices(id, device_name) VALUES(?1, 'This computer')",
+        [&device_id],
+    ).map_err(|e| e.to_string())?;
+    connection.execute("UPDATE app_meta SET value='2' WHERE key='schema_version'", [])
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -238,6 +283,7 @@ fn setup_owner(
         display_name: display_name.to_string(),
         role: "Business Owner".into(),
         branch_id: None,
+        must_change_password: false,
     })
 }
 
@@ -292,7 +338,114 @@ fn login_staff(
         display_name,
         role,
         branch_id,
+        must_change_password: false,
     })
+}
+
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BusinessProfile {
+    id: String,
+    name: String,
+    currency: String,
+    timezone: String,
+    phone: Option<String>,
+    email: Option<String>,
+    address: Option<String>,
+    logo_data_url: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchRecord { id: String, name: String, code: Option<String>, status: String }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaffRecord { staff_id: String, display_name: String, role: String, branch_id: Option<String>, username: String, status: String, must_change_password: bool }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceRecord { id: String, device_name: String, device_type: String, status: String, last_seen_at: String }
+
+fn require_owner(connection: &Connection, actor_id: &str) -> Result<(), String> {
+    let role: Option<String> = connection.query_row(
+        "SELECT role FROM staff_profiles WHERE id=?1 AND status='active'", [actor_id], |r| r.get(0)
+    ).optional().map_err(|e| e.to_string())?;
+    if role.as_deref() != Some("Business Owner") { return Err("Only the business owner can perform this action.".into()); }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_business_profile(database: tauri::State<'_, LocalDatabase>, actor_id: String) -> Result<BusinessProfile, String> {
+    let c=database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    require_owner(&c,&actor_id)?;
+    c.query_row("SELECT id,name,currency,timezone,phone,email,address,logo_data_url FROM businesses ORDER BY created_at LIMIT 1", [], |r| Ok(BusinessProfile{
+        id:r.get(0)?,name:r.get(1)?,currency:r.get(2)?,timezone:r.get(3)?,phone:r.get(4)?,email:r.get(5)?,address:r.get(6)?,logo_data_url:r.get(7)?
+    })).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_business_profile(database: tauri::State<'_, LocalDatabase>, actor_id:String, name:String, phone:Option<String>, email:Option<String>, address:Option<String>, currency:String, timezone:String) -> Result<(),String> {
+    let name=name.trim(); if name.len()<2 || name.len()>120 { return Err("Business name must be 2–120 characters.".into()); }
+    if !["KES","USD","UGX","TZS"].contains(&currency.as_str()) { return Err("Select a supported currency.".into()); }
+    let c=database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    require_owner(&c,&actor_id)?;
+    let id:String=c.query_row("SELECT id FROM businesses ORDER BY created_at LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    c.execute("UPDATE businesses SET name=?1,phone=?2,email=?3,address=?4,currency=?5,timezone=?6 WHERE id=?7",params![name,phone,email,address,currency,timezone,id]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'BUSINESS_PROFILE_UPDATED','business',?3)",params![Uuid::new_v4().to_string(),actor_id,id]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_branches(database:tauri::State<'_,LocalDatabase>,actor_id:String)->Result<Vec<BranchRecord>,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?; require_owner(&c,&actor_id)?;
+    let mut st=c.prepare("SELECT id,name,code,status FROM branches ORDER BY name").map_err(|e|e.to_string())?;
+    let rows=st.query_map([],|r|Ok(BranchRecord{id:r.get(0)?,name:r.get(1)?,code:r.get(2)?,status:r.get(3)?})).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn create_branch(database:tauri::State<'_,LocalDatabase>,actor_id:String,name:String,code:String)->Result<BranchRecord,String>{
+    let name=name.trim(); let code=code.trim().to_uppercase();
+    if name.len()<2 || name.len()>100 {return Err("Branch name must be 2–100 characters.".into());}
+    if code.len()<2 || code.len()>12 || !code.chars().all(|c|c.is_ascii_alphanumeric()||c=='-') {return Err("Branch code must be 2–12 letters, numbers or dashes.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;require_owner(&c,&actor_id)?;
+    let business:String=c.query_row("SELECT id FROM businesses LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let id=Uuid::new_v4().to_string();
+    c.execute("INSERT INTO branches(id,business_id,name,code) VALUES(?1,?2,?3,?4)",params![id,business,name,code]).map_err(|e|if e.to_string().contains("UNIQUE"){"That branch code is already in use.".into()}else{e.to_string()})?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'BRANCH_CREATED','branch',?3)",params![Uuid::new_v4().to_string(),actor_id,id]).map_err(|e|e.to_string())?;
+    Ok(BranchRecord{id,name:name.into(),code:Some(code),status:"active".into()})
+}
+
+#[tauri::command]
+fn list_staff(database:tauri::State<'_,LocalDatabase>,actor_id:String)->Result<Vec<StaffRecord>,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;require_owner(&c,&actor_id)?;
+    let mut st=c.prepare("SELECT p.id,p.display_name,p.role,p.branch_id,a.username,a.status,a.must_change_password FROM staff_profiles p JOIN staff_accounts a ON a.staff_profile_id=p.id ORDER BY p.created_at DESC").map_err(|e|e.to_string())?;
+    let rows=st.query_map([],|r|Ok(StaffRecord{staff_id:r.get(0)?,display_name:r.get(1)?,role:r.get(2)?,branch_id:r.get(3)?,username:r.get(4)?,status:r.get(5)?,must_change_password:r.get::<_,i64>(6)?==1})).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+}
+#[tauri::command]
+fn create_staff(database:tauri::State<'_,LocalDatabase>,actor_id:String,display_name:String,role:String,branch_id:Option<String>)->Result<serde_json::Value,String>{
+    let display=display_name.trim(); if display.len()<2||display.len()>100{return Err("Enter a staff name between 2 and 100 characters.".into());}
+    if !["Manager","Cashier","Storekeeper","Accountant","Supervisor"].contains(&role.as_str()){return Err("Select a valid staff role.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;require_owner(&c,&actor_id)?;
+    if let Some(ref bid)=branch_id {let exists:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[bid],|r|r.get(0)).map_err(|e|e.to_string())?;if exists==0{return Err("Select an active branch.".into());}}
+    let base:String=display.to_lowercase().chars().map(|ch|if ch.is_ascii_alphanumeric(){ch}else{' '}).collect::<String>().split_whitespace().collect::<Vec<_>>().join(".");
+    let mut username=base.chars().take(24).collect::<String>(); if username.len()<3 {username=format!("staff.{}",Uuid::new_v4().simple().to_string().chars().take(6).collect::<String>());}
+    let count:i64=c.query_row("SELECT COUNT(*) FROM staff_accounts WHERE username LIKE ?1",[format!("{username}%")],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if count>0 {username=format!("{}.{}",username,count+1);}
+    let temporary_password=format!("HR-{}!a",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>());
+    let hash=hash_password(&temporary_password)?;let profile=Uuid::new_v4().to_string();let account=Uuid::new_v4().to_string();
+    let business:String=c.query_row("SELECT id FROM businesses LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO staff_profiles(id,business_id,display_name,role,branch_id) VALUES(?1,?2,?3,?4,?5)",params![profile,business,display,role,branch_id]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO staff_accounts(id,staff_profile_id,username,password_hash,must_change_password) VALUES(?1,?2,?3,?4,1)",params![account,profile,username,hash]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STAFF_ACCOUNT_CREATED','staff_profile',?3)",params![Uuid::new_v4().to_string(),actor_id,profile]).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"staffId":profile,"username":username,"temporaryPassword":temporary_password}))
+}
+
+#[tauri::command]
+fn list_devices(database:tauri::State<'_,LocalDatabase>,actor_id:String)->Result<Vec<DeviceRecord>,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;require_owner(&c,&actor_id)?;
+    let mut st=c.prepare("SELECT id,device_name,device_type,status,last_seen_at FROM devices ORDER BY created_at").map_err(|e|e.to_string())?;
+    let rows=st.query_map([],|r|Ok(DeviceRecord{id:r.get(0)?,device_name:r.get(1)?,device_type:r.get(2)?,status:r.get(3)?,last_seen_at:r.get(4)?})).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
 }
 
 pub fn run() {
@@ -307,7 +460,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_local_status,
             setup_owner,
-            login_staff
+            login_staff,
+            get_business_profile,
+            save_business_profile,
+            list_branches,
+            create_branch,
+            list_staff,
+            create_staff,
+            list_devices
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
