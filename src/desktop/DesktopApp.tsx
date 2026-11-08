@@ -20,6 +20,9 @@ export default function DesktopApp() {
   const [displayName, setDisplayName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [tab, setTab] = useState<Tab>('overview');
   const [business, setBusiness] = useState<BusinessProfile | null>(null);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -110,6 +113,9 @@ export default function DesktopApp() {
       </form><div className="footnote">Device ID: {status.deviceId}</div>
     </section></main>
   );
+
+
+  if (session.mustChangePassword) return <main className="screen"><section className="panel narrow"><Brand/><h1>Change your temporary password</h1><p className="muted">Your owner provided a temporary password. Set a new password before continuing.</p><form onSubmit={async (event)=>{event.preventDefault();setError('');if(newPassword!==confirmPassword){setError('The new passwords do not match.');return;}setBusy(true);try{await invoke('change_staff_password',{staffId:session.staffId,currentPassword,newPassword});setSession({...session,mustChangePassword:false});setCurrentPassword('');setNewPassword('');setConfirmPassword('');}catch(e){setError(String(e));}finally{setBusy(false);}}}><label>Temporary password<input type="password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} required/></label><label>New password<input type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} minLength={12} maxLength={128} required/><small>Use at least 12 characters.</small></label><label>Confirm new password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required/></label>{error&&<p className="error">{error}</p>}<button className="primary" disabled={busy}>{busy?'Saving…':'Save new password'}</button></form><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
 
   if (session.role !== 'Business Owner') return <main className="screen"><section className="panel narrow"><Brand/><h1>Welcome, {session.displayName}</h1><p className="muted">Your staff workspace will be enabled in the next desktop module release.</p><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
 
