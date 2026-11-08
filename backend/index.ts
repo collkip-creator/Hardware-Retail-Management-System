@@ -14,6 +14,33 @@ async function listOwned(userId: string, name: string) {
   return result.items;
 }
 
+
+const desktopPairingTable = 'desktop_pairings_global';
+const desktopTokenTable = 'desktop_device_tokens_global';
+
+function randomHex(byteLength: number) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+}
+async function sha256(value: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+}
+function bearerToken(ctx: any) {
+  const headers = ctx.event?.headers || {};
+  const value = headers.authorization || headers.Authorization || '';
+  return typeof value === 'string' && value.startsWith('Bearer ') ? value.slice(7).trim() : '';
+}
+async function authenticatedDesktop(ctx: any) {
+  const token = bearerToken(ctx);
+  if (!token || token.length < 40) return null;
+  const tokenHash = await sha256(token);
+  const [record] = await db.get(desktopTokenTable, [tokenHash], { consistent: true });
+  if (!record || record.status !== 'active') return null;
+  return { ...record, tokenHash };
+}
+
 const starterCatalogue: Array<{ category: string; name: string; unit: string }> = [{"category":"Cement & masonry","name":"Bamburi Cement","unit":"Bag"},{"category":"Cement & masonry","name":"Savannah Cement","unit":"Bag"},{"category":"Cement & masonry","name":"Mombasa Cement","unit":"Bag"},{"category":"Cement & masonry","name":"Simba Cement","unit":"Bag"},{"category":"Cement & masonry","name":"East African Portland Cement","unit":"Bag"},{"category":"Cement & masonry","name":"White Cement","unit":"Bag"},{"category":"Cement & masonry","name":"Tile Adhesive","unit":"Bag"},{"category":"Cement & masonry","name":"Tile Grout","unit":"Bag"},{"category":"Cement & masonry","name":"Wall Putty","unit":"Bag"},{"category":"Cement & masonry","name":"Waterproofing Compound","unit":"Bucket"},{"category":"Cement & masonry","name":"Building Sand","unit":"Ton"},{"category":"Cement & masonry","name":"Plaster Sand","unit":"Ton"},{"category":"Cement & masonry","name":"River Sand","unit":"Ton"},{"category":"Cement & masonry","name":"Ballast","unit":"Ton"},{"category":"Cement & masonry","name":"Quarry Dust","unit":"Ton"},{"category":"Cement & masonry","name":"Hardcore","unit":"Ton"},{"category":"Cement & masonry","name":"Murram","unit":"Ton"},{"category":"Cement & masonry","name":"Building Blocks","unit":"Piece"},{"category":"Cement & masonry","name":"Cabro Blocks","unit":"Piece"},{"category":"Cement & masonry","name":"Clay Bricks","unit":"Piece"},{"category":"Steel & metal","name":"Y8 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Y10 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Y12 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Y16 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Y20 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Y25 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Y32 Reinforcement Bar","unit":"Piece"},{"category":"Steel & metal","name":"Binding Wire","unit":"Kg"},{"category":"Steel & metal","name":"Hoop Iron","unit":"Roll"},{"category":"Steel & metal","name":"Welded Mesh","unit":"Sheet"},{"category":"Steel & metal","name":"Chain Link","unit":"Metre"},{"category":"Steel & metal","name":"Flat Bar","unit":"Piece"},{"category":"Steel & metal","name":"Angle Bar","unit":"Piece"},{"category":"Steel & metal","name":"Square Bar","unit":"Piece"},{"category":"Steel & metal","name":"Round Bar","unit":"Piece"},{"category":"Steel & metal","name":"Steel Plate","unit":"Sheet"},{"category":"Steel & metal","name":"Square Hollow Section","unit":"Piece"},{"category":"Steel & metal","name":"Rectangular Hollow Section","unit":"Piece"},{"category":"Steel & metal","name":"C Channel","unit":"Piece"},{"category":"Steel & metal","name":"I Beam","unit":"Piece"},{"category":"Roofing","name":"Corrugated Mabati","unit":"Sheet"},{"category":"Roofing","name":"Box Profile Mabati","unit":"Sheet"},{"category":"Roofing","name":"Versatile Roofing Sheet","unit":"Sheet"},{"category":"Roofing","name":"Roofing Tile","unit":"Piece"},{"category":"Roofing","name":"Ridge Cap","unit":"Piece"},{"category":"Roofing","name":"Valley Gutter","unit":"Piece"},{"category":"Roofing","name":"Rain Gutter","unit":"Piece"},{"category":"Roofing","name":"Downpipe","unit":"Piece"},{"category":"Roofing","name":"Roofing Nails","unit":"Kg"},{"category":"Roofing","name":"Roofing Screws","unit":"Piece"},{"category":"Roofing","name":"Transparent Roofing Sheet","unit":"Sheet"},{"category":"Plumbing","name":"PVC Pipe","unit":"Piece"},{"category":"Plumbing","name":"PPR Pipe","unit":"Piece"},{"category":"Plumbing","name":"HDPE Pipe","unit":"Metre"},{"category":"Plumbing","name":"uPVC Drainage Pipe","unit":"Piece"},{"category":"Plumbing","name":"PVC Elbow","unit":"Piece"},{"category":"Plumbing","name":"PVC Tee","unit":"Piece"},{"category":"Plumbing","name":"PVC Reducer","unit":"Piece"},{"category":"Plumbing","name":"PVC Socket","unit":"Piece"},{"category":"Plumbing","name":"PVC Union","unit":"Piece"},{"category":"Plumbing","name":"PVC Pipe Glue","unit":"Bottle"},{"category":"Plumbing","name":"Ball Valve","unit":"Piece"},{"category":"Plumbing","name":"Gate Valve","unit":"Piece"},{"category":"Plumbing","name":"Check Valve","unit":"Piece"},{"category":"Plumbing","name":"Bib Tap","unit":"Piece"},{"category":"Plumbing","name":"Pillar Tap","unit":"Piece"},{"category":"Plumbing","name":"Shower Mixer","unit":"Piece"},{"category":"Plumbing","name":"Float Valve","unit":"Piece"},{"category":"Plumbing","name":"Water Tank Connector","unit":"Piece"},{"category":"Plumbing","name":"Water Tank","unit":"Piece"},{"category":"Plumbing","name":"Toilet Suite","unit":"Set"},{"category":"Plumbing","name":"Wash Basin","unit":"Piece"},{"category":"Plumbing","name":"Kitchen Sink","unit":"Piece"},{"category":"Plumbing","name":"Shower Head","unit":"Piece"},{"category":"Plumbing","name":"Floor Drain","unit":"Piece"},{"category":"Plumbing","name":"Submersible Water Pump","unit":"Piece"},{"category":"Plumbing","name":"Booster Pump","unit":"Piece"},{"category":"Electrical","name":"1.5mm Single Core Cable","unit":"Metre"},{"category":"Electrical","name":"2.5mm Single Core Cable","unit":"Metre"},{"category":"Electrical","name":"4mm Single Core Cable","unit":"Metre"},{"category":"Electrical","name":"6mm Single Core Cable","unit":"Metre"},{"category":"Electrical","name":"Twin & Earth Cable","unit":"Metre"},{"category":"Electrical","name":"Flexible Cable","unit":"Metre"},{"category":"Electrical","name":"Electrical Conduit","unit":"Piece"},{"category":"Electrical","name":"Cable Clips","unit":"Pack"},{"category":"Electrical","name":"Junction Box","unit":"Piece"},{"category":"Electrical","name":"PVC Trunking","unit":"Piece"},{"category":"Electrical","name":"One Gang Switch","unit":"Piece"},{"category":"Electrical","name":"Two Gang Switch","unit":"Piece"},{"category":"Electrical","name":"13A Socket","unit":"Piece"},{"category":"Electrical","name":"Plug Top","unit":"Piece"},{"category":"Electrical","name":"LED Bulb 9W","unit":"Piece"},{"category":"Electrical","name":"LED Bulb 12W","unit":"Piece"},{"category":"Electrical","name":"LED Tube Light","unit":"Piece"},{"category":"Electrical","name":"LED Floodlight","unit":"Piece"},{"category":"Electrical","name":"Downlight","unit":"Piece"},{"category":"Electrical","name":"MCB","unit":"Piece"},{"category":"Electrical","name":"RCCB","unit":"Piece"},{"category":"Electrical","name":"Distribution Board","unit":"Piece"},{"category":"Electrical","name":"Insulation Tape","unit":"Roll"},{"category":"Electrical","name":"Cable Tie","unit":"Pack"},{"category":"Electrical","name":"Extension Socket","unit":"Piece"},{"category":"Electrical","name":"Solar Panel","unit":"Piece"},{"category":"Electrical","name":"Solar Charge Controller","unit":"Piece"},{"category":"Electrical","name":"Inverter","unit":"Piece"},{"category":"Electrical","name":"Deep Cycle Battery","unit":"Piece"},{"category":"Timber & boards","name":"Cypress Timber","unit":"Piece"},{"category":"Timber & boards","name":"Pine Timber","unit":"Piece"},{"category":"Timber & boards","name":"Hardwood Timber","unit":"Piece"},{"category":"Timber & boards","name":"Plywood Board","unit":"Sheet"},{"category":"Timber & boards","name":"Marine Plywood","unit":"Sheet"},{"category":"Timber & boards","name":"MDF Board","unit":"Sheet"},{"category":"Timber & boards","name":"Chipboard","unit":"Sheet"},{"category":"Timber & boards","name":"Wooden Batten","unit":"Piece"},{"category":"Timber & boards","name":"Door Frame","unit":"Set"},{"category":"Timber & boards","name":"Gypsum Board","unit":"Sheet"},{"category":"Timber & boards","name":"Gypsum Powder","unit":"Bag"},{"category":"Timber & boards","name":"Metal Stud","unit":"Piece"},{"category":"Timber & boards","name":"Ceiling Channel","unit":"Piece"},{"category":"Timber & boards","name":"PVC Ceiling Panel","unit":"Piece"},{"category":"Timber & boards","name":"Cornice","unit":"Piece"},{"category":"Paint & finishes","name":"Emulsion Paint","unit":"Tin"},{"category":"Paint & finishes","name":"Gloss Paint","unit":"Tin"},{"category":"Paint & finishes","name":"Undercoat","unit":"Tin"},{"category":"Paint & finishes","name":"Primer","unit":"Tin"},{"category":"Paint & finishes","name":"Roof Paint","unit":"Tin"},{"category":"Paint & finishes","name":"Wood Varnish","unit":"Tin"},{"category":"Paint & finishes","name":"Wood Stain","unit":"Tin"},{"category":"Paint & finishes","name":"Metallic Paint","unit":"Tin"},{"category":"Paint & finishes","name":"Waterproof Paint","unit":"Tin"},{"category":"Paint & finishes","name":"Paint Brush","unit":"Piece"},{"category":"Paint & finishes","name":"Paint Roller","unit":"Piece"},{"category":"Paint & finishes","name":"Roller Tray","unit":"Piece"},{"category":"Paint & finishes","name":"Masking Tape","unit":"Roll"},{"category":"Paint & finishes","name":"Sandpaper","unit":"Sheet"},{"category":"Paint & finishes","name":"Paint Thinner","unit":"Litre"},{"category":"Paint & finishes","name":"Turpentine","unit":"Litre"},{"category":"Paint & finishes","name":"Silicone Sealant","unit":"Tube"},{"category":"Paint & finishes","name":"Acrylic Sealant","unit":"Tube"},{"category":"Paint & finishes","name":"Ceramic Floor Tile","unit":"Box"},{"category":"Paint & finishes","name":"Porcelain Tile","unit":"Box"},{"category":"Paint & finishes","name":"Tile Spacer","unit":"Pack"},{"category":"Paint & finishes","name":"Tile Trim","unit":"Piece"},{"category":"Fasteners & fittings","name":"Common Nails","unit":"Kg"},{"category":"Fasteners & fittings","name":"Concrete Nails","unit":"Kg"},{"category":"Fasteners & fittings","name":"Roofing Nails","unit":"Kg"},{"category":"Fasteners & fittings","name":"Panel Pins","unit":"Kg"},{"category":"Fasteners & fittings","name":"Wood Screws","unit":"Pack"},{"category":"Fasteners & fittings","name":"Self Tapping Screws","unit":"Pack"},{"category":"Fasteners & fittings","name":"Bolts","unit":"Piece"},{"category":"Fasteners & fittings","name":"Nuts","unit":"Piece"},{"category":"Fasteners & fittings","name":"Washers","unit":"Piece"},{"category":"Fasteners & fittings","name":"Wall Plugs","unit":"Pack"},{"category":"Fasteners & fittings","name":"Hinges","unit":"Pair"},{"category":"Fasteners & fittings","name":"Padlock","unit":"Piece"},{"category":"Fasteners & fittings","name":"Door Lockset","unit":"Set"},{"category":"Fasteners & fittings","name":"Door Handle","unit":"Pair"},{"category":"Fasteners & fittings","name":"Tower Bolt","unit":"Piece"},{"category":"Fasteners & fittings","name":"Door Closer","unit":"Piece"},{"category":"Fasteners & fittings","name":"Window Stay","unit":"Piece"},{"category":"Tools & equipment","name":"Claw Hammer","unit":"Piece"},{"category":"Tools & equipment","name":"Ball Pein Hammer","unit":"Piece"},{"category":"Tools & equipment","name":"Adjustable Spanner","unit":"Piece"},{"category":"Tools & equipment","name":"Combination Spanner Set","unit":"Set"},{"category":"Tools & equipment","name":"Pliers","unit":"Piece"},{"category":"Tools & equipment","name":"Screwdriver Set","unit":"Set"},{"category":"Tools & equipment","name":"Tape Measure","unit":"Piece"},{"category":"Tools & equipment","name":"Spirit Level","unit":"Piece"},{"category":"Tools & equipment","name":"Hacksaw","unit":"Piece"},{"category":"Tools & equipment","name":"Hand Saw","unit":"Piece"},{"category":"Tools & equipment","name":"Cold Chisel","unit":"Piece"},{"category":"Tools & equipment","name":"Trowel","unit":"Piece"},{"category":"Tools & equipment","name":"Shovel","unit":"Piece"},{"category":"Tools & equipment","name":"Pick Axe","unit":"Piece"},{"category":"Tools & equipment","name":"Electric Drill","unit":"Piece"},{"category":"Tools & equipment","name":"Angle Grinder","unit":"Piece"},{"category":"Tools & equipment","name":"Circular Saw","unit":"Piece"},{"category":"Tools & equipment","name":"Welding Machine","unit":"Piece"},{"category":"Tools & equipment","name":"Drill Bit Set","unit":"Set"},{"category":"Tools & equipment","name":"Cutting Disc","unit":"Piece"},{"category":"Tools & equipment","name":"Grinding Disc","unit":"Piece"},{"category":"Safety & protective wear","name":"Safety Boots","unit":"Pair"},{"category":"Safety & protective wear","name":"Safety Helmet","unit":"Piece"},{"category":"Safety & protective wear","name":"Reflective Jacket","unit":"Piece"},{"category":"Safety & protective wear","name":"Work Gloves","unit":"Pair"},{"category":"Safety & protective wear","name":"Dust Mask","unit":"Piece"},{"category":"Safety & protective wear","name":"Safety Goggles","unit":"Piece"},{"category":"Safety & protective wear","name":"Ear Protection","unit":"Pair"},{"category":"Safety & protective wear","name":"Safety Harness","unit":"Piece"},{"category":"Safety & protective wear","name":"Overalls","unit":"Piece"},{"category":"Safety & protective wear","name":"Fire Extinguisher","unit":"Piece"},{"category":"Safety & protective wear","name":"First Aid Kit","unit":"Kit"},{"category":"Doors & household","name":"Steel Door","unit":"Piece"},{"category":"Doors & household","name":"Flush Door","unit":"Piece"},{"category":"Doors & household","name":"Wooden Door","unit":"Piece"},{"category":"Doors & household","name":"Aluminium Window","unit":"Piece"},{"category":"Doors & household","name":"Glass Pane","unit":"Sheet"},{"category":"Doors & household","name":"Cabinet Handle","unit":"Piece"},{"category":"Doors & household","name":"Drawer Runner","unit":"Pair"},{"category":"Doors & household","name":"Curtain Rail","unit":"Piece"},{"category":"Doors & household","name":"Kitchen Tap","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Drip Irrigation Pipe","unit":"Metre"},{"category":"Agriculture & irrigation","name":"Sprinkler","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Garden Hose Pipe","unit":"Metre"},{"category":"Agriculture & irrigation","name":"Hose Connector","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Knapsack Sprayer","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Spray Nozzle","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Irrigation Filter","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Greenhouse Polythene","unit":"Metre"},{"category":"Agriculture & irrigation","name":"Shade Net","unit":"Metre"},{"category":"Agriculture & irrigation","name":"Poultry Feeder","unit":"Piece"},{"category":"Agriculture & irrigation","name":"Poultry Drinker","unit":"Piece"},{"category":"General supplies","name":"Wheelbarrow","unit":"Piece"},{"category":"General supplies","name":"Ladder","unit":"Piece"},{"category":"General supplies","name":"Plastic Bucket","unit":"Piece"},{"category":"General supplies","name":"Tarpaulin","unit":"Piece"},{"category":"General supplies","name":"Rope","unit":"Metre"},{"category":"General supplies","name":"Plastic Sheet","unit":"Metre"},{"category":"General supplies","name":"Watering Can","unit":"Piece"},{"category":"General supplies","name":"Scaffolding Coupler","unit":"Piece"},{"category":"General supplies","name":"Concrete Mixer","unit":"Piece"}];
 
 function normalise(value: unknown, max = 160) {
@@ -152,6 +179,122 @@ function cashAccountCode(method: string) {
 }
 
 export const handler = router({
+
+  'POST /api/desktop/pairings': [
+    requireAuth(),
+    async ctx => {
+      const userId = ctx.user!.userId;
+      const devices = await db.list(table(userId, 'desktop_devices'), { limit: 100 });
+      const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 90000000 + 10000000);
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      const record = {
+        userId,
+        codeHash: await sha256(code),
+        createdAt: new Date().toISOString(),
+        expiresAt,
+        claimedAt: null,
+        status: 'pending',
+        ownerDevice: devices.items.length === 0,
+      };
+      const [id] = await db.add(desktopPairingTable, [record]);
+      if (!id) return error('A pairing code could not be created. Please try again.', 500);
+      return json({ code, expiresAt, ownerDevice: record.ownerDevice });
+    },
+  ],
+  'POST /api/desktop/pairings/claim': [
+    async ctx => {
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const code = textField(body.code, 16).replace(/\\s/g, '');
+      const deviceId = textField(body.deviceId, 80);
+      const deviceName = textField(body.deviceName, 100) || 'Windows desktop';
+      if (!/^\\d{8}$/.test(code) || !deviceId) return error('Enter a valid 8-digit pairing code and device identity.', 400);
+      const codeHash = await sha256(code);
+      const pairings = await db.list(desktopPairingTable, { limit: 500 });
+      const pairing = pairings.items.find((item: any) => item.codeHash === codeHash && item.status === 'pending');
+      if (!pairing) return error('This pairing code is invalid or has already been used.', 404);
+      if (Date.parse(pairing.expiresAt) <= Date.now()) return error('This pairing code has expired. Generate a new one from the owner portal.', 410);
+      const devices = await db.list(table(pairing.userId, 'desktop_devices'), { limit: 100 });
+      if (devices.items.some((item: any) => item.deviceId === deviceId && item.status === 'active')) {
+        return error('This computer is already registered. Use its existing installation or revoke its previous registration.', 409);
+      }
+      const token = randomHex(32);
+      const tokenHash = await sha256(token);
+      const device = {
+        userId: pairing.userId,
+        deviceId,
+        deviceName,
+        deviceType: 'Windows desktop',
+        ownerDevice: Boolean(pairing.ownerDevice),
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+      };
+      const [deviceRecordId] = await db.add(table(pairing.userId, 'desktop_devices'), [device]);
+      if (!deviceRecordId) return error('The computer could not be registered. Generate a new pairing code and try again.', 500);
+      const [tokenId] = await db.tx.add(desktopTokenTable, [{
+        id: tokenHash,
+        userId: pairing.userId,
+        deviceId,
+        ownerDevice: device.ownerDevice,
+        status: 'active',
+        createdAt: new Date().toISOString(),
+      }]);
+      if (!tokenId) return error('A secure device credential could not be issued.', 500);
+      const [claimed] = await db.tx.update(desktopPairingTable, [{
+        id: pairing.id,
+        record: { claimedAt: new Date().toISOString(), status: 'claimed', claimedDeviceId: deviceId },
+        if: { status: 'pending' },
+      }], { patch: true });
+      if (!claimed) return error('This pairing code has already been claimed. Generate a new code.', 409);
+      return json({ deviceToken: token, ownerDevice: device.ownerDevice, deviceId });
+    },
+  ],
+  'GET /api/desktop/sync/pull': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      const saved = await db.list(table(device.userId, 'desktop_sync_state'), { limit: 1 });
+      const now = new Date().toISOString();
+      const tokenRecord = { id: device.tokenHash, userId: device.userId, deviceId: device.deviceId, ownerDevice: device.ownerDevice, status: 'active', createdAt: device.createdAt, lastSeenAt: now };
+      await db.update(desktopTokenTable, [{ id: device.tokenHash, record: tokenRecord }]);
+      return json({ snapshot: saved.items[0]?.snapshot || null, updatedAt: saved.items[0]?.updatedAt || null, ownerDevice: Boolean(device.ownerDevice) });
+    },
+  ],
+  'POST /api/desktop/sync/push': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      if (!device.ownerDevice) return error('Only the primary owner computer can publish business and staff account changes.', 403);
+      const body = (ctx.body || {}) as Record<string, any>;
+      const snapshot = body.snapshot;
+      if (!snapshot || !snapshot.business || !Array.isArray(snapshot.branches) || !Array.isArray(snapshot.staff)) {
+        return error('The synchronisation snapshot is incomplete.', 400);
+      }
+      if (snapshot.branches.length > 100 || snapshot.staff.length > 200) return error('The current synchronisation limit is 100 branches and 200 staff accounts.', 413);
+      if (snapshot.staff.some((staff: any) => !staff.profile?.id || !staff.account?.username || typeof staff.account?.passwordHash !== 'string' || !staff.account.passwordHash.startsWith('$argon2'))) {
+        return error('Staff synchronisation requires valid account records with Argon2 password hashes. Plaintext passwords are never accepted.', 400);
+      }
+      const size = new TextEncoder().encode(JSON.stringify(snapshot)).length;
+      if (size > 220000) return error('The business snapshot is too large to synchronise in one request. Reduce logo size or staff records and try again.', 413);
+      const targetTable = table(device.userId, 'desktop_sync_state');
+      const existing = await db.list(targetTable, { limit: 1 });
+      const saved = {
+        snapshot,
+        updatedAt: new Date().toISOString(),
+        updatedByDeviceId: device.deviceId,
+        revision: Number(existing.items[0]?.revision || 0) + 1,
+      };
+      if (existing.items[0]) {
+        const [ok] = await db.update(targetTable, [{ id: existing.items[0].id, record: { ...existing.items[0], ...saved } }]);
+        if (!ok) return error('The cloud snapshot could not be updated. Please retry.', 500);
+      } else {
+        const [id] = await db.add(targetTable, [saved]);
+        if (!id) return error('The first cloud snapshot could not be saved. Please retry.', 500);
+      }
+      return json({ ok: true, revision: saved.revision, updatedAt: saved.updatedAt });
+    },
+  ],
+
   'GET /api/health': [
     async () => json({ ok: true, service: 'hardware-retail-foundation' }),
   ],
