@@ -386,13 +386,13 @@ fn get_business_profile(database: tauri::State<'_, LocalDatabase>, actor_id: Str
 }
 
 #[tauri::command]
-fn save_business_profile(database: tauri::State<'_, LocalDatabase>, actor_id:String, name:String, phone:Option<String>, email:Option<String>, address:Option<String>, currency:String, timezone:String) -> Result<(),String> {
+fn save_business_profile(database: tauri::State<'_, LocalDatabase>, actor_id:String, name:String, phone:Option<String>, email:Option<String>, address:Option<String>, logo_data_url:Option<String>, currency:String, timezone:String) -> Result<(),String> {
     let name=name.trim(); if name.len()<2 || name.len()>120 { return Err("Business name must be 2–120 characters.".into()); }
     if !["KES","USD","UGX","TZS"].contains(&currency.as_str()) { return Err("Select a supported currency.".into()); }
     let c=database.0.lock().map_err(|_| "Local database is busy".to_string())?;
     require_owner(&c,&actor_id)?;
     let id:String=c.query_row("SELECT id FROM businesses ORDER BY created_at LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
-    c.execute("UPDATE businesses SET name=?1,phone=?2,email=?3,address=?4,currency=?5,timezone=?6 WHERE id=?7",params![name,phone,email,address,currency,timezone,id]).map_err(|e|e.to_string())?;
+    c.execute("UPDATE businesses SET name=?1,phone=?2,email=?3,address=?4,logo_data_url=?5,currency=?6,timezone=?7 WHERE id=?8",params![name,phone,email,address,logo_data_url,currency,timezone,id]).map_err(|e|e.to_string())?;
     c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'BUSINESS_PROFILE_UPDATED','business',?3)",params![Uuid::new_v4().to_string(),actor_id,id]).map_err(|e|e.to_string())?;
     Ok(())
 }
