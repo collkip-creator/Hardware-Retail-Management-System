@@ -165,3 +165,12 @@ td { color:#3d4d42; }
 .logo-upload label { flex:1; }
 .logo-upload input[type=file] { border:0; padding:5px 0; font-size:11px; }
 @media(max-width:600px) { .logo-upload { align-items:flex-start; flex-wrap:wrap; } }
+
+.pair-device-card { margin-top:22px; padding:17px; border:1px solid #dce8de; border-radius:11px; background:#f8fbf8; }
+.pair-device-card h2 { font-size:15px; margin:0 0 6px; color:#214d36; }
+.pair-device-card p { color:#718078; font-size:11px; line-height:1.55; margin:0 0 12px; }
+.pair-device-card form { display:grid; gap:10px; }
+.pair-device-card button { width:100%; margin-top:10px; }
+.device-sync-status { display:flex; flex-direction:column; gap:5px; padding:15px; margin:15px 0; border-radius:10px; background:#f3f8f4; border:1px solid #dce9df; }
+.device-sync-status strong { color:#214d36; font-size:13px; }
+.device-sync-status span,.device-sync-status small { color:#718078; font-size:11px; }
