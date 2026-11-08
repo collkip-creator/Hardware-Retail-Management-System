@@ -137,33 +137,22 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     ).map_err(|e| e.to_string())?;
 
     // Additive migrations keep existing installed databases intact.
-    for (column, definition) in [
-        ("phone", "TEXT"),
-        ("email", "TEXT"),
-        ("address", "TEXT"),
-        ("logo_data_url", "TEXT"),
-    ] {
-        let exists: bool = connection
-            .prepare("PRAGMA table_info(businesses)")
-            .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(1)))
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .any(|name| name == column);
-        if !exists {
-            connection.execute_batch(&format!("ALTER TABLE businesses ADD COLUMN {column} {definition};"))
-                .map_err(|e| e.to_string())?;
+    fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})")).map_err(|e| e.to_string())?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
+        for name in rows { if name.map_err(|e| e.to_string())? == column { return Ok(true); } }
+        Ok(false)
+    }
+    for (column, definition) in [("phone", "TEXT"), ("email", "TEXT"), ("address", "TEXT"), ("logo_data_url", "TEXT")] {
+        if !has_column(connection, "businesses", column)? {
+            connection.execute_batch(&format!("ALTER TABLE businesses ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
         }
     }
-    let staff_columns: Vec<String> = connection
-        .prepare("PRAGMA table_info(staff_accounts)")
-        .and_then(|mut stmt| stmt.query_map([], |row| row.get::<_, String>(1)).map(|rows| rows.filter_map(Result::ok).collect()))
-        .map_err(|e| e.to_string())?;
-    if !staff_columns.iter().any(|c| c == "must_change_password") {
-        connection.execute_batch("ALTER TABLE staff_accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;")
-            .map_err(|e| e.to_string())?;
+    if !has_column(connection, "staff_accounts", "must_change_password")? {
+        connection.execute_batch("ALTER TABLE staff_accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;").map_err(|e| e.to_string())?;
     }
     connection.execute_batch("
-        CREATE TABLE IF NOT EXISTS devices (
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_branches_business_code ON branches(business_id, code) WHERE code IS NOT NULL;\n        CREATE TABLE IF NOT EXISTS devices (
             id TEXT PRIMARY KEY,
             device_name TEXT NOT NULL,
             device_type TEXT NOT NULL DEFAULT 'Windows desktop',
