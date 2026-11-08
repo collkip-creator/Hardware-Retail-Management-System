@@ -36,7 +36,8 @@ async function authenticatedDesktop(ctx: any) {
   const token = bearerToken(ctx);
   if (!token || token.length < 40) return null;
   const tokenHash = await sha256(token);
-  const [record] = await db.get(desktopTokenTable, [tokenHash], { consistent: true });
+  const tokens = await db.list(desktopTokenTable, { limit: 500 });
+  const record = tokens.items.find((item: any) => item.tokenHash === tokenHash);
   if (!record || record.status !== 'active') return null;
   return { ...record, tokenHash };
 }
@@ -237,8 +238,8 @@ export const handler = router({
       };
       const [deviceRecordId] = await db.add(table(pairing.userId, 'desktop_devices'), [device]);
       if (!deviceRecordId) return error('The computer could not be registered. Generate a new pairing code and try again.', 500);
-      const [tokenId] = await db.tx.add(desktopTokenTable, [{
-        id: tokenHash,
+      const [tokenId] = await db.add(desktopTokenTable, [{
+        tokenHash,
         userId: pairing.userId,
         deviceId,
         ownerDevice: device.ownerDevice,
@@ -255,8 +256,8 @@ export const handler = router({
       if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
       const saved = await db.list(table(device.userId, 'desktop_sync_state'), { limit: 1 });
       const now = new Date().toISOString();
-      const tokenRecord = { id: device.tokenHash, userId: device.userId, deviceId: device.deviceId, ownerDevice: device.ownerDevice, status: 'active', createdAt: device.createdAt, lastSeenAt: now };
-      await db.update(desktopTokenTable, [{ id: device.tokenHash, record: tokenRecord }]);
+      const tokenRecord = { ...device, lastSeenAt: now };
+      await db.update(desktopTokenTable, [{ id: device.id, record: tokenRecord }]);
       return json({ snapshot: saved.items[0]?.snapshot || null, updatedAt: saved.items[0]?.updatedAt || null, ownerDevice: Boolean(device.ownerDevice) });
     },
   ],
