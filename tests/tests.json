@@ -54,5 +54,48 @@
       "Review the calculated owner's equity and submit"
     ],
     "expected": "Account labels and amount inputs remain usable on mobile and the calculated equity is visible before posting."
+  },
+  {
+    "name": "Generate a Windows desktop pairing code",
+    "viewport": "desktop",
+    "covers": [
+      "owner portal desktop pairing",
+      "short-lived pairing code generation",
+      "device pairing instructions"
+    ],
+    "description": "Verifies an authenticated business owner can generate a one-time code to pair a Windows computer.",
+    "steps": [
+      "Sign in to the owner portal",
+      "Open Connectivity",
+      "Choose Generate pairing code",
+      "Review the displayed code and expiry"
+    ],
+    "expected": "An eight-digit pairing code, expiry time and clear instructions for entering the code in the Windows application are displayed."
+  },
+  {
+    "name": "Show a clear error when pairing-code generation fails",
+    "viewport": "mobile",
+    "covers": [
+      "pairing API error handling",
+      "visible pairing failure feedback",
+      "disabled pairing action while offline"
+    ],
+    "description": "Verifies a failed pairing-code request is communicated without displaying a false success state.",
+    "qa_faults": [
+      {
+        "method": "POST",
+        "path": "/api/desktop/pairings",
+        "status": 500,
+        "body_json": {
+          "error": "Pairing service temporarily unavailable."
+        }
+      }
+    ],
+    "steps": [
+      "Sign in to the owner portal",
+      "Open Connectivity",
+      "Choose Generate pairing code"
+    ],
+    "expected": "A visible error explains that a pairing code could not be generated, and no pairing code is shown."
   }
 ]
