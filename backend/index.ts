@@ -218,6 +218,28 @@ export const handler = router({
       const deviceId = textField(body.deviceId, 80);
       const deviceName = textField(body.deviceName, 100) || 'Windows desktop';
       if (!/^\\d{8}$/.test(code) || !deviceId) return error('Enter a valid 8-digit pairing code and device identity.', 400);
+      const sourceIp = textField(ctx.event?.requestContext?.http?.sourceIp || ctx.event?.requestContext?.identity?.sourceIp || 'unknown', 80);
+      const ipHash = await sha256(sourceIp);
+      const attemptsTable = 'desktop_pairing_attempts_global';
+      const attempts = await db.list(attemptsTable, { limit: 500 });
+      const currentAttempt = attempts.items.find((item: any) => item.ipHash === ipHash);
+      const now = Date.now();
+      const inWindow = currentAttempt && now - Date.parse(currentAttempt.windowStartedAt) < 10 * 60 * 1000;
+      if (inWindow && Number(currentAttempt.attempts || 0) >= 10) {
+        return error('Too many pairing attempts from this connection. Wait 10 minutes and generate a new code.', 429);
+      }
+      const attemptRecord = {
+        ipHash,
+        attempts: inWindow ? Number(currentAttempt.attempts || 0) + 1 : 1,
+        windowStartedAt: inWindow ? currentAttempt.windowStartedAt : new Date().toISOString(),
+      };
+      if (currentAttempt) {
+        const [saved] = await db.update(attemptsTable, [{ id: currentAttempt.id, record: { ...currentAttempt, ...attemptRecord } }]);
+        if (!saved) return error('Pairing protection could not be updated. Please retry shortly.', 503);
+      } else {
+        const [saved] = await db.add(attemptsTable, [attemptRecord]);
+        if (!saved) return error('Pairing protection could not be initialised. Please retry shortly.', 503);
+      }
       const codeHash = await sha256(code);
       const pairings = await db.list(desktopPairingTable, { limit: 500 });
       const pairing = pairings.items.find((item: any) => item.codeHash === codeHash && item.status === 'pending');
