@@ -261,6 +261,35 @@ export const handler = router({
       return json({ snapshot: saved.items[0]?.snapshot || null, updatedAt: saved.items[0]?.updatedAt || null, ownerDevice: Boolean(device.ownerDevice) });
     },
   ],
+  'POST /api/desktop/sync/password': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      const body = (ctx.body || {}) as Record<string, any>;
+      const staffId = textField(body.staffId, 80);
+      const expectedHash = typeof body.expectedPasswordHash === 'string' ? body.expectedPasswordHash : '';
+      const nextHash = typeof body.passwordHash === 'string' ? body.passwordHash : '';
+      if (!staffId || !expectedHash.startsWith('$argon2') || !nextHash.startsWith('$argon2')) {
+        return error('A staff ID and Argon2 password hashes are required. Plaintext passwords are never accepted.', 400);
+      }
+      const targetTable = table(device.userId, 'desktop_sync_state');
+      const saved = await db.list(targetTable, { limit: 1 });
+      const current = saved.items[0];
+      if (!current?.snapshot || !Array.isArray(current.snapshot.staff)) return error('The primary computer has not synchronised staff accounts yet.', 409);
+      const snapshot = JSON.parse(JSON.stringify(current.snapshot));
+      const staffRecord = snapshot.staff.find((item: any) => item.profile?.id === staffId);
+      if (!staffRecord?.account) return error('This staff account is not present in the cloud workspace.', 404);
+      if (staffRecord.account.passwordHash === nextHash) return json({ ok: true, alreadyApplied: true });
+      if (staffRecord.account.passwordHash !== expectedHash) return error('The staff password has changed on another computer. Sync this computer and try again.', 409);
+      staffRecord.account.passwordHash = nextHash;
+      staffRecord.account.mustChangePassword = false;
+      const updatedAt = new Date().toISOString();
+      const record = { ...current, snapshot, updatedAt, revision: Number(current.revision || 0) + 1 };
+      const [ok] = await db.update(targetTable, [{ id: current.id, record }]);
+      if (!ok) return error('The password update could not be saved to the cloud. Please retry.', 500);
+      return json({ ok: true, updatedAt });
+    },
+  ],
   'POST /api/desktop/sync/push': [
     async ctx => {
       const device = await authenticatedDesktop(ctx);
@@ -279,6 +308,16 @@ export const handler = router({
       if (size > 220000) return error('The business snapshot is too large to synchronise in one request. Reduce logo size or staff records and try again.', 413);
       const targetTable = table(device.userId, 'desktop_sync_state');
       const existing = await db.list(targetTable, { limit: 1 });
+      const latestSnapshot = existing.items[0]?.snapshot;
+      if (latestSnapshot && Array.isArray(latestSnapshot.staff)) {
+        for (const staff of snapshot.staff) {
+          const latest = latestSnapshot.staff.find((item: any) => item.profile?.id === staff.profile?.id);
+          if (latest?.account?.passwordHash && latest.account.passwordHash !== staff.account.passwordHash) {
+            staff.account.passwordHash = latest.account.passwordHash;
+            staff.account.mustChangePassword = Boolean(latest.account.mustChangePassword);
+          }
+        }
+      }
       const saved = {
         snapshot,
         updatedAt: new Date().toISOString(),
@@ -292,7 +331,7 @@ export const handler = router({
         const [id] = await db.add(targetTable, [saved]);
         if (!id) return error('The first cloud snapshot could not be saved. Please retry.', 500);
       }
-      return json({ ok: true, revision: saved.revision, updatedAt: saved.updatedAt });
+      return json({ ok: true, revision: saved.revision, updatedAt: saved.updatedAt, snapshot: saved.snapshot });
     },
   ],
 
