@@ -32,12 +32,21 @@ function bearerToken(ctx: any) {
   const value = headers.authorization || headers.Authorization || '';
   return typeof value === 'string' && value.startsWith('Bearer ') ? value.slice(7).trim() : '';
 }
+type DesktopDeviceToken = {
+  userId: string;
+  deviceId: string;
+  ownerDevice: boolean;
+  status: string;
+  createdAt: string;
+  tokenHash: string;
+};
+
 async function authenticatedDesktop(ctx: any) {
   const token = bearerToken(ctx);
   if (!token || token.length < 40) return null;
   const tokenHash = await sha256(token);
-  const tokens = await db.list(desktopTokenTable, { limit: 500 });
-  const record = tokens.items.find((item: any) => item.tokenHash === tokenHash);
+  const tokens = await db.list<DesktopDeviceToken>(desktopTokenTable, { limit: 500 });
+  const record = tokens.items.find(item => item.tokenHash === tokenHash);
   if (!record || record.status !== 'active') return null;
   return { ...record, tokenHash };
 }
