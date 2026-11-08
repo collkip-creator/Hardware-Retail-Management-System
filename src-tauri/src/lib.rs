@@ -451,6 +451,192 @@ fn list_devices(database:tauri::State<'_,LocalDatabase>,actor_id:String)->Result
     rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
 }
 
+
+const DESKTOP_API_BASE: &str = "https://api-v2.appdeploy.ai/app/hardware-retail-management-system-84id5j/api";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceSyncStatus { paired: bool, owner_device: bool, last_sync_at: Option<String> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingResult { device_id: String, owner_device: bool }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncResult { owner_device: bool, updated_at: String, branches: usize, staff: usize }
+
+fn read_sync_value(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+    connection.query_row("SELECT value FROM sync_state WHERE key=?1", [key], |row| row.get(0))
+        .optional().map_err(|e| e.to_string())
+}
+
+fn write_sync_value(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
+    connection.execute(
+        "INSERT INTO sync_state(key,value,updated_at) VALUES(?1,?2,CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        params![key,value],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Result<DeviceSyncStatus, String> {
+    let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let token = read_sync_value(&connection, "device_token")?;
+    let owner = read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true";
+    let last = read_sync_value(&connection, "last_sync_at")?;
+    Ok(DeviceSyncStatus { paired: token.is_some(), owner_device: owner, last_sync_at: last })
+}
+
+#[tauri::command]
+async fn pair_desktop_device(
+    database: tauri::State<'_, LocalDatabase>,
+    pairing_code: String,
+    device_name: String,
+) -> Result<PairingResult, String> {
+    let (device_id, already_paired) = {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        let id: String = connection.query_row("SELECT value FROM app_meta WHERE key='device_id'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        (id, read_sync_value(&connection, "device_token")?.is_some())
+    };
+    if already_paired { return Err("This computer is already paired. Use Sync now to refresh it.".into()); }
+    let code = pairing_code.trim();
+    if code.len() != 8 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Enter the 8-digit code shown in the online owner portal.".into());
+    }
+    let client = reqwest::Client::new();
+    let response = client.post(format!("{DESKTOP_API_BASE}/desktop/pairings/claim"))
+        .json(&serde_json::json!({ "code": code, "deviceId": device_id, "deviceName": device_name.trim() }))
+        .send().await.map_err(|e| format!("Could not reach the owner portal: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| format!("The owner portal returned an unreadable response: {e}"))?;
+    if !status.is_success() {
+        return Err(body.get("error").and_then(|v|v.as_str()).unwrap_or("Pairing failed. Generate a fresh code and try again.").to_string());
+    }
+    let token = body.get("deviceToken").and_then(|v|v.as_str()).ok_or_else(|| "The owner portal did not issue a device credential.".to_string())?;
+    let owner_device = body.get("ownerDevice").and_then(|v|v.as_bool()).unwrap_or(false);
+    let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    write_sync_value(&connection, "device_token", token)?;
+    write_sync_value(&connection, "owner_device", if owner_device { "true" } else { "false" })?;
+    connection.execute("UPDATE devices SET device_name=?1,last_seen_at=CURRENT_TIMESTAMP WHERE id=?2",params![device_name.trim(),device_id]).map_err(|e|e.to_string())?;
+    Ok(PairingResult { device_id, owner_device })
+}
+
+fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, String> {
+    let business = connection.query_row(
+        "SELECT id,name,currency,timezone,phone,email,address,logo_data_url FROM businesses ORDER BY created_at LIMIT 1",
+        [], |r| Ok(serde_json::json!({
+            "id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"currency":r.get::<_,String>(2)?,
+            "timezone":r.get::<_,String>(3)?,"phone":r.get::<_,Option<String>>(4)?,"email":r.get::<_,Option<String>>(5)?,
+            "address":r.get::<_,Option<String>>(6)?,"logoDataUrl":r.get::<_,Option<String>>(7)?
+        }))
+    ).optional().map_err(|e|e.to_string())?.ok_or_else(|| "Complete business setup before synchronising this computer.".to_string())?;
+    let mut branch_statement=connection.prepare("SELECT id,name,code,status FROM branches ORDER BY created_at").map_err(|e|e.to_string())?;
+    let branch_rows=branch_statement.query_map([],|r|Ok(serde_json::json!({
+        "id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?,"status":r.get::<_,String>(3)?
+    }))).map_err(|e|e.to_string())?;
+    let branches=branch_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut staff_statement=connection.prepare(
+        "SELECT p.id,p.business_id,p.display_name,p.role,p.branch_id,p.status,a.username,a.password_hash,a.status,a.must_change_password
+         FROM staff_profiles p JOIN staff_accounts a ON a.staff_profile_id=p.id ORDER BY p.created_at"
+    ).map_err(|e|e.to_string())?;
+    let staff_rows=staff_statement.query_map([],|r|Ok(serde_json::json!({
+        "profile":{"id":r.get::<_,String>(0)?,"businessId":r.get::<_,String>(1)?,"displayName":r.get::<_,String>(2)?,
+            "role":r.get::<_,String>(3)?,"branchId":r.get::<_,Option<String>>(4)?,"status":r.get::<_,String>(5)?},
+        "account":{"username":r.get::<_,String>(6)?,"passwordHash":r.get::<_,String>(7)?,
+            "status":r.get::<_,String>(8)?,"mustChangePassword":r.get::<_,i64>(9)?==1}
+    }))).map_err(|e|e.to_string())?;
+    let staff=staff_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff}))
+}
+
+fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Value) -> Result<(), String> {
+    let business=snapshot.get("business").ok_or_else(||"The cloud business profile is missing.".to_string())?;
+    let business_id=business["id"].as_str().ok_or_else(||"The cloud business ID is invalid.".to_string())?;
+    let name=business["name"].as_str().unwrap_or("Business");
+    let currency=business["currency"].as_str().unwrap_or("KES");
+    let timezone=business["timezone"].as_str().unwrap_or("Africa/Nairobi");
+    let tx=connection.transaction().map_err(|e|e.to_string())?;
+    tx.execute(
+        "INSERT INTO businesses(id,name,currency,timezone,phone,email,address,logo_data_url)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(id) DO UPDATE SET name=excluded.name,currency=excluded.currency,timezone=excluded.timezone,
+         phone=excluded.phone,email=excluded.email,address=excluded.address,logo_data_url=excluded.logo_data_url",
+        params![business_id,name,currency,timezone,business["phone"].as_str(),business["email"].as_str(),
+            business["address"].as_str(),business["logoDataUrl"].as_str()],
+    ).map_err(|e|e.to_string())?;
+    if let Some(branches)=snapshot["branches"].as_array() {
+        for branch in branches {
+            let id=branch["id"].as_str().ok_or_else(||"A cloud branch has no ID.".to_string())?;
+            tx.execute(
+                "INSERT INTO branches(id,business_id,name,code,status) VALUES(?1,?2,?3,?4,?5)
+                 ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,status=excluded.status",
+                params![id,business_id,branch["name"].as_str().unwrap_or("Branch"),branch["code"].as_str(),branch["status"].as_str().unwrap_or("active")],
+            ).map_err(|e|e.to_string())?;
+        }
+    }
+    if let Some(staff)=snapshot["staff"].as_array() {
+        for item in staff {
+            let profile=&item["profile"]; let account=&item["account"];
+            let id=profile["id"].as_str().ok_or_else(||"A cloud staff profile has no ID.".to_string())?;
+            let username=account["username"].as_str().ok_or_else(||"A cloud staff account has no username.".to_string())?;
+            let hash=account["passwordHash"].as_str().ok_or_else(||"A cloud staff account has no password hash.".to_string())?;
+            if !hash.starts_with("$argon2") { return Err("The cloud contains an unsupported staff password hash. No accounts were imported.".into()); }
+            tx.execute(
+                "INSERT INTO staff_profiles(id,business_id,display_name,role,branch_id,status) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,role=excluded.role,branch_id=excluded.branch_id,status=excluded.status",
+                params![id,business_id,profile["displayName"].as_str().unwrap_or("Staff"),profile["role"].as_str().unwrap_or("Cashier"),
+                    profile["branchId"].as_str(),profile["status"].as_str().unwrap_or("active")],
+            ).map_err(|e|e.to_string())?;
+            tx.execute(
+                "INSERT INTO staff_accounts(id,staff_profile_id,username,password_hash,status,must_change_password)
+                 VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(staff_profile_id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,
+                 status=excluded.status,must_change_password=excluded.must_change_password",
+                params![Uuid::new_v4().to_string(),id,username,hash,account["status"].as_str().unwrap_or("active"),
+                    if account["mustChangePassword"].as_bool().unwrap_or(false){1}else{0}],
+            ).map_err(|e|e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Result<SyncResult, String> {
+    let (token, owner_device, snapshot) = {
+        let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+        let token=read_sync_value(&connection,"device_token")?.ok_or_else(||"Pair this computer with the online owner portal first.".to_string())?;
+        let owner=read_sync_value(&connection,"owner_device")?.unwrap_or_default()=="true";
+        let snapshot=if owner { Some(build_local_snapshot(&connection)?) } else { None };
+        (token,owner,snapshot)
+    };
+    let client=reqwest::Client::new();
+    if let Some(snapshot)=snapshot {
+        let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/push")).bearer_auth(&token)
+            .json(&serde_json::json!({"snapshot":snapshot})).send().await
+            .map_err(|e|format!("Could not upload this computer's changes: {e}"))?;
+        let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+        if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Cloud upload failed.").to_string());}
+    }
+    let response=client.get(format!("{DESKTOP_API_BASE}/desktop/sync/pull")).bearer_auth(&token).send().await
+        .map_err(|e|format!("Could not download the latest business data: {e}"))?;
+    let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+    if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Cloud download failed.").to_string());}
+    let remote=body.get("snapshot").filter(|v|!v.is_null()).ok_or_else(||"The primary owner computer has not uploaded a business snapshot yet. Sync the primary computer first.".to_string())?;
+    let updated_at=body["updatedAt"].as_str().unwrap_or("").to_string();
+    let branches=remote["branches"].as_array().map(|x|x.len()).unwrap_or(0);
+    let staff=remote["staff"].as_array().map(|x|x.len()).unwrap_or(0);
+    if !owner_device {
+        let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+        apply_remote_snapshot(&mut connection,remote)?;
+    }
+    let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    write_sync_value(&connection,"last_sync_at",&updated_at)?;
+    Ok(SyncResult{owner_device,updated_at,branches,staff})
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -471,7 +657,10 @@ pub fn run() {
             list_staff,
             create_staff,
             list_devices,
-            change_staff_password
+            change_staff_password,
+            get_device_sync_status,
+            pair_desktop_device,
+            sync_desktop_workspace
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
