@@ -154,6 +154,8 @@ function App() {
   });
   const [online, setOnline] = useState(navigator.onLine);
   const [lastSync, setLastSync] = useState<string | null>(null);
+  const [desktopPairing, setDesktopPairing] = useState<{ code: string; expiresAt: string; ownerDevice: boolean } | null>(null);
+  const [pairingLoading, setPairingLoading] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [businessForm, setBusinessForm] = useState({
@@ -282,6 +284,22 @@ function App() {
     { id: 'accounting', label: 'Accounting', icon: Calculator },
     { id: 'sync', label: 'Connectivity', icon: ArrowDownUp },
   ] as const;
+
+
+  async function generateDesktopPairing() {
+    setError('');
+    setNotice('');
+    setPairingLoading(true);
+    try {
+      const result = await api.post('/api/desktop/pairings', {});
+      setDesktopPairing(result.data);
+      setNotice('A one-time Windows pairing code has been generated. It expires in 10 minutes.');
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e.message || 'Could not generate a Windows pairing code.');
+    } finally {
+      setPairingLoading(false);
+    }
+  }
 
   async function saveBusiness(e: React.FormEvent) {
     e.preventDefault();
@@ -1825,6 +1843,30 @@ function App() {
                   <RefreshCw size={16} /> Refresh cloud workspace
                 </button>
               </section>
+              <section className="panel desktop-pairing-panel">
+                <div className="panel-heading">
+                  <div>
+                    <h3>Connect a Windows computer</h3>
+                    <p>Generate a one-time code here, then enter it in the Hardware Retail Windows application. Keep both devices online until the first sync finishes.</p>
+                  </div>
+                  <Smartphone size={22} />
+                </div>
+                {desktopPairing ? (
+                  <div className="pairing-code-result">
+                    <span className="pairing-code-label">ONE-TIME PAIRING CODE</span>
+                    <strong>{desktopPairing.code}</strong>
+                    <p>{desktopPairing.ownerDevice ? 'This will register the first computer as the primary owner computer.' : 'This computer will be registered as an additional branch computer.'}</p>
+                    <small>Expires: {new Date(desktopPairing.expiresAt).toLocaleString()}</small>
+                    <button className="secondary-button" onClick={() => navigator.clipboard.writeText(desktopPairing.code)}>Copy code</button>
+                  </div>
+                ) : (
+                  <p className="muted">No active code has been generated in this session.</p>
+                )}
+                <button className="primary-button" onClick={generateDesktopPairing} disabled={!online || pairingLoading}>
+                  <Plus size={16} /> {pairingLoading ? 'Generating…' : desktopPairing ? 'Generate a new code' : 'Generate pairing code'}
+                </button>
+              </section>
+
               <section className="panel">
                 <div className="panel-heading">
                   <div>
