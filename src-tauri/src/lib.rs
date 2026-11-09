@@ -467,7 +467,7 @@ const DESKTOP_API_BASE: &str = "https://api-v2.appdeploy.ai/app/hardware-retail-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DeviceSyncStatus { paired: bool, owner_device: bool, last_sync_at: Option<String> }
+struct DeviceSyncStatus { paired: bool, owner_device: bool, licence_active: bool, last_sync_at: Option<String> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -497,27 +497,40 @@ async fn activate_desktop_licence(
     licence_key: String,
     device_name: String,
 ) -> Result<serde_json::Value, String> {
-    let (device_id, already_activated, existing_business_id) = {
+    let (device_id, existing_token, owner_device, existing_business_id) = {
         let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
         let id: String = connection.query_row("SELECT value FROM app_meta WHERE key='device_id'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
         let business_id: Option<String> = connection.query_row(
             "SELECT id FROM businesses ORDER BY created_at LIMIT 1", [], |row| row.get(0)
         ).optional().map_err(|e| e.to_string())?;
-        (id, read_sync_value(&connection, "device_token")?.is_some(), business_id)
+        let token = read_sync_value(&connection, "device_token")?;
+        let owner = read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true";
+        (id, token, owner, business_id)
     };
-    if already_activated { return Err("This computer is already activated or paired.".into()); }
+    if existing_token.is_some() && !owner_device {
+        return Err("Only the primary Business Owner computer can activate the business licence.".into());
+    }
     let key = licence_key.trim().to_uppercase();
     if key.len() < 12 || key.len() > 100 || !key.starts_with("HRMS-") { return Err("Enter a valid licence key.".into()); }
-    let client = reqwest::Client::new();
-    let response = client.post(format!("{DESKTOP_API_BASE}/desktop/licences/activate"))
-        .json(&serde_json::json!({"licenceKey":key,"deviceId":device_id,"deviceName":device_name.trim(),"businessId":existing_business_id}))
-        .send().await.map_err(|e| format!("Could not reach the licence activation service: {e}"))?;
+    let attaching_existing = existing_token.is_some();
+    let endpoint = if attaching_existing { "attach" } else { "activate" };
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()
+        .map_err(|e| format!("Could not initialise the licence connection: {e}"))?;
+    let request = client.post(format!("{DESKTOP_API_BASE}/desktop/licences/{endpoint}"))
+        .json(&serde_json::json!({"licenceKey":key,"deviceId":device_id,"deviceName":device_name.trim(),"businessId":existing_business_id}));
+    let response = if let Some(token) = existing_token.as_deref() {
+        request.bearer_auth(token).send().await
+    } else {
+        request.send().await
+    }.map_err(|e| format!("Could not reach the licence activation service. Check the internet connection and allow api-v2.appdeploy.ai through any firewall or proxy. Details: {e}"))?;
     let status = response.status();
-    let body: serde_json::Value = response.json().await.map_err(|e| format!("The licence service returned an unreadable response: {e}"))?;
+    let body: serde_json::Value = response.json().await.map_err(|e|e.to_string())?;
     if !status.is_success() {
         return Err(body.get("error").and_then(|v|v.as_str()).unwrap_or("Licence activation failed.").to_string());
     }
-    let token = body.get("deviceToken").and_then(|v|v.as_str()).ok_or_else(|| "The activation service did not issue a device credential.".to_string())?;
+    let token = body.get("deviceToken").and_then(|v|v.as_str())
+        .or(existing_token.as_deref())
+        .ok_or_else(|| "The activation service did not issue a device credential.".to_string())?;
     let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
     write_sync_value(&connection, "device_token", token)?;
     write_sync_value(&connection, "owner_device", "true")?;
@@ -532,8 +545,9 @@ fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Result<D
     let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
     let token = read_sync_value(&connection, "device_token")?;
     let owner = read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true";
+    let licence_id = read_sync_value(&connection, "licence_id")?.unwrap_or_default();
     let last = read_sync_value(&connection, "last_sync_at")?;
-    Ok(DeviceSyncStatus { paired: token.is_some(), owner_device: owner, last_sync_at: last })
+    Ok(DeviceSyncStatus { paired: token.is_some(), owner_device: owner, licence_active: !licence_id.is_empty(), last_sync_at: last })
 }
 
 #[derive(Serialize)]
