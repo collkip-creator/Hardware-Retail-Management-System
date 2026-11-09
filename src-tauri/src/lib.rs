@@ -620,7 +620,7 @@ async fn pair_desktop_device(
     if already_paired { return Err("This computer is already paired. Use Sync now to refresh it.".into()); }
     let code = pairing_code.trim();
     if code.len() != 8 || !code.chars().all(|c| c.is_ascii_digit()) {
-        return Err("Enter the 8-digit code shown in the online owner portal.".into());
+        return Err("Enter the 8-digit code generated on an authorised computer by the Business Owner.".into());
     }
     let client = reqwest::Client::new();
     let response = client.post(format!("{DESKTOP_API_BASE}/desktop/pairings/claim"))
