@@ -209,6 +209,51 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     connection.execute("UPDATE app_meta SET value='2' WHERE key='schema_version'", [])
         .map_err(|e| e.to_string())?;
 
+
+    // Phase 7 inventory tables and additive stock-ledger migration.
+    connection.execute_batch("
+        CREATE TABLE IF NOT EXISTS branch_reorder_levels (
+            id TEXT PRIMARY KEY, product_id TEXT NOT NULL REFERENCES products(id),
+            branch_id TEXT NOT NULL REFERENCES branches(id),
+            minimum_quantity REAL NOT NULL DEFAULT 0, maximum_quantity REAL,
+            updated_by TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(product_id, branch_id)
+        );
+        CREATE TABLE IF NOT EXISTS stock_transfers (
+            id TEXT PRIMARY KEY, transfer_number TEXT NOT NULL UNIQUE,
+            from_branch_id TEXT NOT NULL REFERENCES branches(id),
+            to_branch_id TEXT NOT NULL REFERENCES branches(id),
+            status TEXT NOT NULL DEFAULT 'REQUESTED',
+            notes TEXT, created_by TEXT NOT NULL, dispatched_by TEXT, received_by TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            dispatched_at TEXT, received_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS stock_transfer_items (
+            id TEXT PRIMARY KEY, transfer_id TEXT NOT NULL REFERENCES stock_transfers(id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL REFERENCES products(id), quantity REAL NOT NULL CHECK(quantity > 0)
+        );
+        CREATE TABLE IF NOT EXISTS stocktake_sessions (
+            id TEXT PRIMARY KEY, branch_id TEXT NOT NULL REFERENCES branches(id),
+            status TEXT NOT NULL DEFAULT 'OPEN', created_by TEXT NOT NULL,
+            approved_by TEXT, notes TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            approved_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS stocktake_items (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES stocktake_sessions(id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL REFERENCES products(id),
+            system_quantity REAL NOT NULL, counted_quantity REAL,
+            UNIQUE(session_id, product_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_stock_transfer_status ON stock_transfers(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_stocktake_branch_status ON stocktake_sessions(branch_id, status);
+    ").map_err(|e| e.to_string())?;
+    if !has_column(connection, "stock_movements", "quantity_delta")? {
+        connection.execute_batch("ALTER TABLE stock_movements ADD COLUMN quantity_delta REAL NOT NULL DEFAULT 0;")
+            .map_err(|e| e.to_string())?;
+        connection.execute_batch("UPDATE stock_movements SET quantity_delta = CASE WHEN movement_type='SALE' THEN -quantity ELSE quantity END;")
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -915,7 +960,7 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
     let mut stock=Vec::new();
     for p in &products {
         let pid=p["id"].as_str().unwrap_or_default();
-        let mut st=c.prepare("SELECT branch_id,COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 GROUP BY branch_id").map_err(|e|e.to_string())?;
+        let mut st=c.prepare("SELECT branch_id,COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 GROUP BY branch_id").map_err(|e|e.to_string())?;
         let rows=st.query_map([pid],|r|Ok(serde_json::json!({"branchId":r.get::<_,String>(0)?,"quantity":r.get::<_,f64>(1)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
         for row in rows { stock.push(serde_json::json!({"productId":pid,"branchId":row["branchId"],"quantity":row["quantity"]})); }
     }
@@ -952,7 +997,7 @@ fn receive_pos_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Stri
     if valid==0||branch==0{return Err("Select a valid product and active branch.".into());}
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
     let movement=Uuid::new_v4().to_string();
-    tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'RECEIPT',?4,?5,?6,?7,?8)",params![movement,product_id,branch_id,quantity,unit_cost,quantity*unit_cost,reference,actor_staff_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'RECEIPT',?4,?4,?5,?6,?7,?8)",params![movement,product_id,branch_id,quantity,unit_cost,quantity*unit_cost,reference,actor_staff_id]).map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCK_RECEIVED','stock_movement',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,movement,serde_json::json!({"productId":product_id,"branchId":branch_id,"quantity":quantity,"unitCost":unit_cost}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())
 }
@@ -990,7 +1035,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
         let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;
         if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}
         let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
-        let stock:f64=tx.query_row("SELECT COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let stock:f64=tx.query_row("SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
         let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();
         if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
         let price=product.2;
@@ -1005,11 +1050,180 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     for line in &lines{
         let item_id=Uuid::new_v4().to_string();
         tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item_id,sale_id,line["productId"].as_str(),line["name"].as_str(),line["quantity"].as_f64(),line["unitPrice"].as_f64(),line["unitCost"].as_f64(),line["lineTotal"].as_f64()]).map_err(|e|e.to_string())?;
-        tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'SALE',?4,?5,?6,?7,?8)",params![Uuid::new_v4().to_string(),line["productId"].as_str(),branch_id,line["quantity"].as_f64(),line["unitCost"].as_f64(),line["quantity"].as_f64().unwrap_or(0.0)*line["unitCost"].as_f64().unwrap_or(0.0),receipt,actor_staff_id]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'SALE',?4,-?4,?5,?6,?7,?8)",params![Uuid::new_v4().to_string(),line["productId"].as_str(),branch_id,line["quantity"].as_f64(),line["unitCost"].as_f64(),line["quantity"].as_f64().unwrap_or(0.0)*line["unitCost"].as_f64().unwrap_or(0.0),receipt,actor_staff_id]).map_err(|e|e.to_string())?;
     }
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SALE_COMPLETED','sale',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,sale_id,serde_json::json!({"receiptNumber":receipt,"total":total,"paymentMethod":method}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"total":total,"paymentMethod":method,"items":lines}))
+}
+
+
+fn inventory_actor_role(c: &Connection, actor_id: &str, allowed: &[&str]) -> Result<String, String> {
+    let role: Option<String> = c.query_row(
+        "SELECT role FROM staff_profiles WHERE id=?1 AND status='active'", [actor_id], |r| r.get(0)
+    ).optional().map_err(|e| e.to_string())?;
+    let role = role.ok_or_else(|| "Your staff account is inactive or unavailable.".to_string())?;
+    if !allowed.contains(&role.as_str()) { return Err("Your role is not authorised for this inventory action.".into()); }
+    Ok(role)
+}
+
+fn local_stock_balance(c: &Connection, product_id: &str, branch_id: &str) -> Result<f64, String> {
+    c.query_row(
+        "SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",
+        params![product_id, branch_id], |r| r.get(0)
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_inventory_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: String) -> Result<serde_json::Value, String> {
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let role=inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper","Supervisor"])?;
+    let mut branches_stmt=c.prepare("SELECT id,name,code FROM branches WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
+    let branches=branches_stmt.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut products_stmt=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
+    let products=products_stmt.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut stock=Vec::new();
+    for p in &products { for b in &branches {
+        let q=local_stock_balance(&c,p["id"].as_str().unwrap_or_default(),b["id"].as_str().unwrap_or_default())?;
+        stock.push(serde_json::json!({"productId":p["id"],"branchId":b["id"],"quantity":q}));
+    }}
+    let mut levels_stmt=c.prepare("SELECT product_id,branch_id,minimum_quantity,maximum_quantity FROM branch_reorder_levels").map_err(|e|e.to_string())?;
+    let levels=levels_stmt.query_map([],|r|Ok(serde_json::json!({"productId":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"minimumQuantity":r.get::<_,f64>(2)?,"maximumQuantity":r.get::<_,Option<f64>>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut movements_stmt=c.prepare("SELECT m.id,m.product_id,p.name,m.branch_id,b.name,m.movement_type,m.quantity_delta,m.unit_cost,m.reference,m.created_at FROM stock_movements m JOIN products p ON p.id=m.product_id JOIN branches b ON b.id=m.branch_id ORDER BY m.created_at DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let movements=movements_stmt.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"productId":r.get::<_,String>(1)?,"productName":r.get::<_,String>(2)?,"branchId":r.get::<_,String>(3)?,"branchName":r.get::<_,String>(4)?,"type":r.get::<_,String>(5)?,"quantityDelta":r.get::<_,f64>(6)?,"unitCost":r.get::<_,f64>(7)?,"reference":r.get::<_,Option<String>>(8)?,"createdAt":r.get::<_,String>(9)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut transfers_stmt=c.prepare("SELECT t.id,t.transfer_number,t.from_branch_id,f.name,t.to_branch_id,d.name,t.status,t.created_at FROM stock_transfers t JOIN branches f ON f.id=t.from_branch_id JOIN branches d ON d.id=t.to_branch_id ORDER BY t.created_at DESC LIMIT 50").map_err(|e|e.to_string())?;
+    let transfers=transfers_stmt.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"number":r.get::<_,String>(1)?,"fromBranchId":r.get::<_,String>(2)?,"fromBranch":r.get::<_,String>(3)?,"toBranchId":r.get::<_,String>(4)?,"toBranch":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,"createdAt":r.get::<_,String>(7)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut takes_stmt=c.prepare("SELECT id,branch_id,status,created_at,notes FROM stocktake_sessions ORDER BY created_at DESC LIMIT 30").map_err(|e|e.to_string())?;
+    let stocktakes=takes_stmt.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"createdAt":r.get::<_,String>(3)?,"notes":r.get::<_,Option<String>>(4)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"role":role,"branches":branches,"products":products,"stock":stock,"reorderLevels":levels,"movements":movements,"transfers":transfers,"stocktakes":stocktakes}))
+}
+
+#[tauri::command]
+fn save_reorder_level(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,product_id:String,branch_id:String,minimum_quantity:f64,maximum_quantity:Option<f64>)->Result<(),String>{
+    if !minimum_quantity.is_finite()||minimum_quantity<0.0||maximum_quantity.is_some_and(|v|!v.is_finite()||v<minimum_quantity){return Err("Enter valid stock limits; maximum must be at least the minimum.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let branch:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if valid==0||branch==0{return Err("Select an active product and branch.".into());}
+    c.execute("INSERT INTO branch_reorder_levels(id,product_id,branch_id,minimum_quantity,maximum_quantity,updated_by,updated_at) VALUES(?1,?2,?3,?4,?5,?6,CURRENT_TIMESTAMP) ON CONFLICT(product_id,branch_id) DO UPDATE SET minimum_quantity=excluded.minimum_quantity,maximum_quantity=excluded.maximum_quantity,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP",params![Uuid::new_v4().to_string(),product_id,branch_id,minimum_quantity,maximum_quantity,actor_staff_id]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'REORDER_LEVEL_UPDATED','product',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,product_id,serde_json::json!({"branchId":branch_id,"minimum":minimum_quantity,"maximum":maximum_quantity}).to_string()]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn adjust_inventory_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,product_id:String,branch_id:String,quantity_delta:f64,reason:String)->Result<(),String>{
+    let reason=reason.trim();
+    if !quantity_delta.is_finite()||quantity_delta==0.0||reason.len()<3||reason.len()>300{return Err("Enter a non-zero adjustment and a reason (3–300 characters).".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let current=local_stock_balance(&c,&product_id,&branch_id)?;
+    if current+quantity_delta < -0.000001{return Err(format!("This adjustment would make stock negative. Available: {current}"));}
+    let exists:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if exists==0{return Err("Select an active product.".into());}
+    let id=Uuid::new_v4().to_string();let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'ADJUSTMENT',?4,?5,0,0,?6,?7)",params![id,product_id,branch_id,quantity_delta.abs(),quantity_delta,reason,actor_staff_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCK_ADJUSTED','stock_movement',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"productId":product_id,"branchId":branch_id,"delta":quantity_delta,"reason":reason,"balanceAfter":current+quantity_delta}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+fn create_stock_transfer(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,from_branch_id:String,to_branch_id:String,items:Vec<serde_json::Value>,notes:Option<String>)->Result<serde_json::Value,String>{
+    if from_branch_id==to_branch_id||items.is_empty()||items.len()>200{return Err("Choose two different branches and add at least one transfer line.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let mut clean:Vec<(String,f64)>=Vec::new();
+    for item in &items{let pid=item["productId"].as_str().ok_or_else(||"A transfer line is missing its product.".to_string())?.to_string();let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid transfer quantity.".to_string())?;if !qty.is_finite()||qty<=0.0{return Err("Transfer quantities must be greater than zero.".into());}if clean.iter().any(|x|x.0==pid){return Err("A product can only appear once in a transfer.".into());}let balance=local_stock_balance(&c,&pid,&from_branch_id)?;if qty>balance+0.000001{return Err(format!("Insufficient stock for transfer. Available: {balance}"));}clean.push((pid,qty));}
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id IN (?1,?2) AND status='active'",params![from_branch_id,to_branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if valid!=2{return Err("Both transfer branches must be active.".into());}
+    let id=Uuid::new_v4().to_string();let number=format!("TR-{}",Uuid::new_v4().simple().to_string().chars().take(10).collect::<String>().to_uppercase());
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO stock_transfers(id,transfer_number,from_branch_id,to_branch_id,notes,created_by) VALUES(?1,?2,?3,?4,?5,?6)",params![id,number,from_branch_id,to_branch_id,notes,actor_staff_id]).map_err(|e|e.to_string())?;
+    for (pid,qty) in clean{tx.execute("INSERT INTO stock_transfer_items(id,transfer_id,product_id,quantity) VALUES(?1,?2,?3,?4)",params![Uuid::new_v4().to_string(),id,pid,qty]).map_err(|e|e.to_string())?;}
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCK_TRANSFER_REQUESTED','stock_transfer',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"number":number,"from":from_branch_id,"to":to_branch_id}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"number":number,"status":"REQUESTED"}))
+}
+
+#[tauri::command]
+fn dispatch_stock_transfer(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,transfer_id:String)->Result<(),String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    let (from,status):(String,String)=tx.query_row("SELECT from_branch_id,status FROM stock_transfers WHERE id=?1",[&transfer_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Transfer not found.".to_string())?;
+    if status!="REQUESTED"{return Err("Only requested transfers can be dispatched.".into());}
+    let mut stmt=tx.prepare("SELECT product_id,quantity FROM stock_transfer_items WHERE transfer_id=?1").map_err(|e|e.to_string())?;
+    let items=stmt.query_map([&transfer_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
+    for (pid,qty) in items{let bal=local_stock_balance(&tx,&pid,&from)?;if qty>bal+0.000001{return Err(format!("Insufficient stock at dispatch time. Available: {bal}"));}let cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND quantity_delta>0",params![pid,from],|r|r.get(0)).map_err(|e|e.to_string())?;tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'ADJUSTMENT',?4,?5,?6,?7,?8,?9)",params![Uuid::new_v4().to_string(),pid,from,qty,-qty,cost,qty*cost,transfer_id,actor_staff_id]).map_err(|e|e.to_string())?;}
+    tx.execute("UPDATE stock_transfers SET status='IN_TRANSIT',dispatched_by=?1,dispatched_at=CURRENT_TIMESTAMP WHERE id=?2",params![actor_staff_id,transfer_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STOCK_TRANSFER_DISPATCHED','stock_transfer',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,transfer_id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+fn receive_stock_transfer(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,transfer_id:String)->Result<(),String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    let (to,status):(String,String)=tx.query_row("SELECT to_branch_id,status FROM stock_transfers WHERE id=?1",[&transfer_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Transfer not found.".to_string())?;
+    if status!="IN_TRANSIT"{return Err("Only dispatched transfers can be received.".into());}
+    let mut stmt=tx.prepare("SELECT i.product_id,i.quantity,COALESCE((SELECT m.unit_cost FROM stock_movements m WHERE m.reference=?1 AND m.product_id=i.product_id ORDER BY m.created_at DESC LIMIT 1),0) FROM stock_transfer_items i WHERE i.transfer_id=?1").map_err(|e|e.to_string())?;
+    let items=stmt.query_map([&transfer_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?,r.get::<_,f64>(2)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
+    for (pid,qty,cost) in items{tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'ADJUSTMENT',?4,?5,?6,?7,?8,?9)",params![Uuid::new_v4().to_string(),pid,to,qty,qty,cost,qty*cost,transfer_id,actor_staff_id]).map_err(|e|e.to_string())?;}
+    tx.execute("UPDATE stock_transfers SET status='RECEIVED',received_by=?1,received_at=CURRENT_TIMESTAMP WHERE id=?2",params![actor_staff_id,transfer_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STOCK_TRANSFER_RECEIVED','stock_transfer',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,transfer_id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+fn create_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,notes:Option<String>)->Result<String,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;if valid==0{return Err("Select an active branch.".into());}
+    let id=Uuid::new_v4().to_string();let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO stocktake_sessions(id,branch_id,created_by,notes) VALUES(?1,?2,?3,?4)",params![id,branch_id,actor_staff_id,notes]).map_err(|e|e.to_string())?;
+    let mut stmt=tx.prepare("SELECT id FROM products WHERE status='active'").map_err(|e|e.to_string())?;
+    let ids=stmt.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
+    for pid in ids{let q=local_stock_balance(&tx,&pid,&branch_id)?;tx.execute("INSERT INTO stocktake_items(id,session_id,product_id,system_quantity) VALUES(?1,?2,?3,?4)",params![Uuid::new_v4().to_string(),id,pid,q]).map_err(|e|e.to_string())?;}
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STOCKTAKE_CREATED','stocktake',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(id)
+}
+
+#[tauri::command]
+fn get_stocktake_details(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,session_id:String)->Result<serde_json::Value,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let (branch,status):(String,String)=c.query_row("SELECT branch_id,status FROM stocktake_sessions WHERE id=?1",[&session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Stocktake session not found.".to_string())?;
+    let mut stmt=c.prepare("SELECT i.product_id,p.name,p.sku,p.unit,i.system_quantity,i.counted_quantity FROM stocktake_items i JOIN products p ON p.id=i.product_id WHERE i.session_id=?1 ORDER BY p.name").map_err(|e|e.to_string())?;
+    let items=stmt.query_map([&session_id],|r|Ok(serde_json::json!({"productId":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"systemQuantity":r.get::<_,f64>(4)?,"countedQuantity":r.get::<_,Option<f64>>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":session_id,"branchId":branch,"status":status,"items":items}))
+}
+
+#[tauri::command]
+fn save_stocktake_count(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,session_id:String,product_id:String,counted_quantity:f64)->Result<(),String>{
+    if !counted_quantity.is_finite()||counted_quantity<0.0{return Err("Counted quantity must be zero or greater.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let status:Option<String>=c.query_row("SELECT status FROM stocktake_sessions WHERE id=?1",[&session_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if status.as_deref()!=Some("OPEN"){return Err("Only open stocktakes can be edited.".into());}
+    let changed=c.execute("UPDATE stocktake_items SET counted_quantity=?1 WHERE session_id=?2 AND product_id=?3",params![counted_quantity,session_id,product_id]).map_err(|e|e.to_string())?;
+    if changed==0{return Err("Product is not part of this stocktake.".into());}Ok(())
+}
+
+#[tauri::command]
+fn approve_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,session_id:String)->Result<(),String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    let (branch,status):(String,String)=tx.query_row("SELECT branch_id,status FROM stocktake_sessions WHERE id=?1",[&session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Stocktake session not found.".to_string())?;
+    if status!="OPEN"{return Err("This stocktake is not open.".into());}
+    let missing:i64=tx.query_row("SELECT COUNT(*) FROM stocktake_items WHERE session_id=?1 AND counted_quantity IS NULL",[&session_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if missing>0{return Err(format!("Enter counts for all products before approval. {missing} count(s) are missing."));}
+    let mut stmt=tx.prepare("SELECT product_id,system_quantity,counted_quantity FROM stocktake_items WHERE session_id=?1").map_err(|e|e.to_string())?;
+    let items=stmt.query_map([&session_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?,r.get::<_,f64>(2)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
+    for (pid,system,counted) in items{let delta=counted-system;if delta.abs()>0.000001{let current=local_stock_balance(&tx,&pid,&branch)?;if current+delta < -0.000001{return Err("A stocktake variance would create negative stock.".into());}tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'ADJUSTMENT',?4,?5,0,0,?6,?7)",params![Uuid::new_v4().to_string(),pid,branch,delta.abs(),delta,session_id,actor_staff_id]).map_err(|e|e.to_string())?;}}
+    tx.execute("UPDATE stocktake_sessions SET status='APPROVED',approved_by=?1,approved_at=CURRENT_TIMESTAMP WHERE id=?2",params![actor_staff_id,session_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STOCKTAKE_APPROVED','stocktake',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,session_id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
 }
 
 
@@ -1043,7 +1257,17 @@ pub fn run() {
             create_pos_product,
             receive_pos_stock,
             open_pos_shift,
-            process_pos_sale
+            process_pos_sale,
+            get_inventory_workspace,
+            save_reorder_level,
+            adjust_inventory_stock,
+            create_stock_transfer,
+            dispatch_stock_transfer,
+            receive_stock_transfer,
+            create_stocktake,
+            get_stocktake_details,
+            save_stocktake_count,
+            approve_stocktake
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
