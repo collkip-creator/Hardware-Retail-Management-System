@@ -943,7 +943,7 @@ fn create_pos_product(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Str
 
 #[tauri::command]
 fn receive_pos_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,product_id:String,branch_id:String,quantity:f64,unit_cost:f64,reference:Option<String>)->Result<(),String>{
-    if !quantity.is_finite()||quantity<=0||!unit_cost.is_finite()||unit_cost<0{return Err("Enter a positive quantity and a valid unit cost.".into());}
+    if !quantity.is_finite()||quantity<=0.0||!unit_cost.is_finite()||unit_cost<0.0{return Err("Enter a positive quantity and a valid unit cost.".into());}
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can receive stock.".into());}
@@ -959,7 +959,7 @@ fn receive_pos_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Stri
 
 #[tauri::command]
 fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,opening_float:f64)->Result<serde_json::Value,String>{
-    if !opening_float.is_finite()||opening_float<0{return Err("Enter a valid non-negative opening float.".into());}
+    if !opening_float.is_finite()||opening_float<0.0{return Err("Enter a valid non-negative opening float.".into());}
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let role:Option<(String,Option<String>)>=c.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
     let (role,assigned)=role.ok_or_else(||"Staff account is inactive.".to_string())?;
@@ -988,7 +988,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     for item in &items{
         let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;
         let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;
-        if !qty.is_finite()||qty<=0{return Err("Sale quantities must be greater than zero.".into());}
+        if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}
         let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
         let stock:f64=tx.query_row("SELECT COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
         let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();
