@@ -8,7 +8,7 @@ type Branch = { id: string; name: string; code: string | null; status: string };
 type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
 type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
 type Tab = 'overview' | 'business' | 'branches' | 'staff' | 'devices';
-type SyncStatus = { paired: boolean; ownerDevice: boolean; licenceActive: boolean; lastSyncAt: string | null };
+type SyncStatus = { paired: boolean; ownerDevice: boolean; licenceActive: boolean; licenceStatus: string; licenceMessage: string | null; lastSyncAt: string | null };
 type SyncResult = { ownerDevice: boolean; updatedAt: string; branches: number; staff: number };
 type PairingCodeResult = { code: string; expiresAt: string; ownerDevice: boolean };
 
@@ -37,7 +37,7 @@ export default function DesktopApp() {
   const [newStaffRole, setNewStaffRole] = useState('Cashier');
   const [newStaffBranch, setNewStaffBranch] = useState('');
   const [credentials, setCredentials] = useState<{ username: string; temporaryPassword: string } | null>(null);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ paired: false, ownerDevice: false, licenceActive: false, lastSyncAt: null });
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ paired: false, ownerDevice: false, licenceActive: false, licenceStatus: 'none', licenceMessage: null, lastSyncAt: null });
   const [licenceKey, setLicenceKey] = useState('');
   const [pairingCode, setPairingCode] = useState('');
   const [pairingResult, setPairingResult] = useState<PairingCodeResult | null>(null);
@@ -93,7 +93,7 @@ export default function DesktopApp() {
     event.preventDefault(); setError(''); setNotice(''); setBusy(true);
     try {
       if (!navigator.onLine) throw new Error('Connect this computer to the internet to activate your licence.');
-      await invoke('activate_desktop_licence', { licenceKey: licenceKey.trim(), deviceName: 'Primary Windows computer' });
+      await invoke('activate_desktop_licence', { licenceKey: licenceKey.trim(), deviceName: 'Windows desktop', actorStaffId: session?.staffId ?? null });
       setLicenceKey('');
       const next = await invoke<SyncStatus>('get_device_sync_status');
       setSyncStatus(next);
@@ -242,7 +242,7 @@ export default function DesktopApp() {
     </aside>
     <section className="main-area"><header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{nav.find(n=>n.id===tab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0,1).toUpperCase()}</span><span>{session.displayName}<small>Business Owner</small></span></div></header>
       {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
-      {!syncStatus.licenceActive && syncStatus.ownerDevice && <div className="content-card licence-activation-card"><div className="section-heading"><div><h2>Activate your business licence</h2><p>Link this existing primary computer and Business Owner workspace to the Collkip licence. Your local business and staff accounts will be preserved.</p></div></div><form className="inline-form" onSubmit={activateLicence}><label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label><button className="primary" type="submit" disabled={busy||!online||licenceKey.trim().length<12}>{busy?'Activating…':'Activate licence'}</button></form></div>}
+      {session.role === 'Business Owner' && syncStatus.paired && !syncStatus.licenceActive && <div className="content-card licence-activation-card"><div className="section-heading"><div><h2>{syncStatus.licenceStatus === 'none' ? 'Activate your business licence' : 'Replace your business licence'}</h2><p>{syncStatus.licenceMessage || 'Your business licence is not active. Enter a replacement key below.'} Your existing business data and local accounts will be preserved. You can do this from any authorised computer.</p></div></div><form className="inline-form" onSubmit={activateLicence}><label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label><button className="primary" type="submit" disabled={busy||!online||licenceKey.trim().length<12}>{busy?'Processing…':syncStatus.licenceStatus === 'none' ? 'Activate licence' : 'Replace licence'}</button></form></div>}
       {!business?<div className="panel"><p>Loading your business workspace…</p></div>:<>
       {tab==='overview'&&<><div className="welcome-card"><div><p className="eyebrow">YOUR BUSINESS WORKSPACE</p><h2>{business.name}</h2><p>Manage your business details, branches, staff accounts and authorised computers from one place.</p></div><div className="welcome-mark">HR</div></div>
         <div className="metric-grid"><Metric label="Branches" value={branches.length} hint="Registered locations"/><Metric label="Staff accounts" value={staff.length} hint="Local accounts on this device"/><Metric label="Authorised devices" value={devices.length} hint="Device records on this computer"/></div>
