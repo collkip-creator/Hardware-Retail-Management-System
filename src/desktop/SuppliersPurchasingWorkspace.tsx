@@ -43,6 +43,11 @@ export default function SuppliersPurchasingWorkspace({session}:{session:Session}
   const visibleSuppliers=useMemo(()=> (workspace?.suppliers||[]).filter(s=>[s.name,s.contactName,s.phone,s.email,s.kraPin].join(' ').toLowerCase().includes(supplierSearch.toLowerCase())),[workspace,supplierSearch]);
   const selectedWarehouseOptions=(workspace?.warehouses||[]).filter(w=>w.branchId===branchId);
   const orderTotal=lines.reduce((sum,x)=>sum+Number(x.quantity||0)*Number(x.unitCost||0),0);
+  const procurementBlockReason = !workspace.suppliers.some(x=>x.active) ? 'Add an active supplier before creating a purchase order.'
+    : !workspace.branches.length ? 'Create a branch in Business Setup before creating a purchase order.'
+    : !workspace.warehouses.some(x=>x.branchId===branchId) ? 'This branch has no receiving warehouse. Restart the updated Windows app to create its Main Warehouse automatically.'
+    : !workspace.products.length ? 'Add at least one active product to Products & Stock before creating a purchase order.'
+    : '';
   function editSupplier(s:Supplier){setEditingSupplier(s.id);setSupplier({name:s.name||'',contactName:s.contactName||'',phone:s.phone||'',email:s.email||'',kraPin:s.kraPin||'',address:s.address||''});}
   async function saveSupplier(e:FormEvent){
     e.preventDefault();setBusy(true);setError('');setNotice('');
@@ -97,6 +102,7 @@ export default function SuppliersPurchasingWorkspace({session}:{session:Session}
     {section==='purchasing'&&<div className="procurement-purchase-layout">
       <section className="content-card"><div className="section-heading"><div><h2>Create purchase order</h2><p>Record what you are ordering. Stock changes only after goods are received.</p></div></div>
         <form onSubmit={createOrder}>
+          {procurementBlockReason&&<p className="helper procurement-block-reason" role="status">{procurementBlockReason}</p>}
           <div className="form-grid">
             <label>Supplier *<select required value={supplierId} onChange={e=>setSupplierId(e.target.value)}><option value="">Select supplier</option>{workspace.suppliers.filter(s=>s.active).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
             <label>Receiving branch *<select required value={branchId} onChange={e=>{setBranchId(e.target.value);setWarehouseId('');}}><option value="">Select branch</option>{workspace.branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></label>
@@ -112,7 +118,7 @@ export default function SuppliersPurchasingWorkspace({session}:{session:Session}
             <label>Unit cost (KSh) *<input type="number" min="0" step="0.01" required value={line.unitCost} onChange={e=>setLines(lines.map((x,i)=>i===index?{...x,unitCost:e.target.value}:x))}/></label>
             <button type="button" className="text-button" disabled={lines.length===1} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}>Remove</button>
           </div>)}
-          <div className="form-actions procurement-order-actions"><button type="button" className="secondary" onClick={()=>setLines([...lines,{productId:'',quantity:'1',unitCost:'0'}])}>+ Add item</button><strong>Order total: {money(orderTotal)}</strong><button className="primary" disabled={busy||!workspace.suppliers.length||!workspace.branches.length||!workspace.warehouses.length}>{busy?'Creating…':'Create purchase order'}</button></div>
+          <div className="form-actions procurement-order-actions"><button type="button" className="secondary" onClick={()=>setLines([...lines,{productId:'',quantity:'1',unitCost:'0'}])}>+ Add item</button><strong>Order total: {money(orderTotal)}</strong><button className="primary" type="submit" disabled={busy||!!procurementBlockReason}>{busy?'Creating purchase order…':'Create purchase order'}</button></div>
         </form>
       </section>
       <section className="content-card"><div className="section-heading"><div><h2>Purchase orders & supplier balances</h2><p>Receive goods and record payments against supplier invoices.</p></div><span className="count-pill">{workspace.purchases.length} orders</span></div>
