@@ -555,26 +555,53 @@ fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Result<D
 struct PairingCodeResult { code: String, expires_at: String, owner_device: bool }
 
 #[tauri::command]
-async fn generate_desktop_pairing_code(database: tauri::State<'_, LocalDatabase>) -> Result<PairingCodeResult, String> {
-    let (token, owner_device) = {
+async fn generate_desktop_pairing_code(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+) -> Result<PairingCodeResult, String> {
+    let (token, password_hash) = {
         let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
-        let token = read_sync_value(&connection, "device_token")?.ok_or_else(|| "Pair the primary computer before generating additional device codes.".to_string())?;
-        let owner = read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true";
-        (token, owner)
+        let token = read_sync_value(&connection, "device_token")?
+            .ok_or_else(|| "Pair this computer with the business before generating a pairing code.".to_string())?;
+        let password_hash: Option<String> = connection.query_row(
+            "SELECT a.password_hash
+             FROM staff_accounts a
+             JOIN staff_profiles p ON p.id = a.staff_profile_id
+             WHERE p.id = ?1
+               AND p.role = 'Business Owner'
+               AND p.status = 'active'
+               AND a.status = 'active'",
+            [&actor_staff_id],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        let password_hash = password_hash
+            .ok_or_else(|| "Only the signed-in Business Owner can generate pairing codes.".to_string())?;
+        (token, password_hash)
     };
-    if !owner_device { return Err("Only the primary Business Owner computer can generate pairing codes.".into()); }
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Could not initialise the pairing service connection: {e}"))?;
     let response = client.post(format!("{DESKTOP_API_BASE}/desktop/pairings/issue"))
-        .bearer_auth(&token).json(&serde_json::json!({})).send().await
-        .map_err(|e| format!("Could not reach the licensing and sync service: {e}"))?;
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "actorStaffId": actor_staff_id,
+            "passwordHash": password_hash
+        }))
+        .send().await
+        .map_err(|e| format!("Could not reach the pairing service. Check the internet connection. Details: {e}"))?;
     let status = response.status();
-    let body: serde_json::Value = response.json().await.map_err(|e| format!("The cloud service returned an unreadable response: {e}"))?;
+    let body: serde_json::Value = response.json().await
+        .map_err(|e| format!("The cloud service returned an unreadable response: {e}"))?;
     if !status.is_success() {
-        return Err(body.get("error").and_then(|v| v.as_str()).unwrap_or("Could not generate a pairing code.").to_string());
+        return Err(body.get("error").and_then(|v| v.as_str())
+            .unwrap_or("Could not generate a pairing code.").to_string());
     }
     Ok(PairingCodeResult {
-        code: body.get("code").and_then(|v| v.as_str()).ok_or_else(|| "The cloud service did not return a pairing code.".to_string())?.to_string(),
-        expires_at: body.get("expiresAt").and_then(|v| v.as_str()).ok_or_else(|| "The cloud service did not return an expiry time.".to_string())?.to_string(),
+        code: body.get("code").and_then(|v| v.as_str())
+            .ok_or_else(|| "The cloud service did not return a pairing code.".to_string())?.to_string(),
+        expires_at: body.get("expiresAt").and_then(|v| v.as_str())
+            .ok_or_else(|| "The cloud service did not return an expiry time.".to_string())?.to_string(),
         owner_device: body.get("ownerDevice").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
