@@ -265,6 +265,37 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
+
+    // Suppliers, purchase orders and supplier-payment cashbook records.
+    connection.execute_batch("
+        CREATE TABLE IF NOT EXISTS suppliers (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            name TEXT NOT NULL, contact_name TEXT, phone TEXT, email TEXT, kra_pin TEXT,
+            address TEXT, active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_suppliers_business_name ON suppliers(business_id,name);
+        CREATE TABLE IF NOT EXISTS purchase_orders (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            order_number TEXT NOT NULL UNIQUE, supplier_id TEXT NOT NULL REFERENCES suppliers(id),
+            supplier_name TEXT NOT NULL, branch_id TEXT NOT NULL REFERENCES branches(id),
+            warehouse_id TEXT NOT NULL REFERENCES warehouses(id), invoice_number TEXT,
+            expected_date TEXT, notes TEXT, items_json TEXT NOT NULL,
+            total REAL NOT NULL, paid_amount REAL NOT NULL DEFAULT 0,
+            payments_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'ORDERED',
+            payment_status TEXT NOT NULL DEFAULT 'UNPAID',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_purchase_orders_branch_created ON purchase_orders(branch_id,created_at);
+        CREATE TABLE IF NOT EXISTS cashbook_entries (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            entry_type TEXT NOT NULL, direction TEXT NOT NULL, amount REAL NOT NULL,
+            payment_method TEXT NOT NULL, reference TEXT, description TEXT NOT NULL,
+            source_type TEXT NOT NULL, source_id TEXT NOT NULL, actor_staff_id TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    ").map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -1333,6 +1364,137 @@ fn receive_catalogue_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_i
 }
 
 
+
+fn procurement_actor(c:&Connection,actor_id:&str,allowed:&[&str])->Result<(String,Option<String>,String),String>{
+    let row:Option<(String,Option<String>,String)>=c.query_row(
+        "SELECT p.role,p.branch_id,p.business_id FROM staff_profiles p JOIN staff_accounts a ON a.staff_profile_id=p.id WHERE p.id=?1 AND p.status='active' AND a.status='active'",
+        [actor_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+    ).optional().map_err(|e|e.to_string())?;
+    let (role,branch,business)=row.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
+    if !allowed.contains(&role.as_str()){return Err("Your role is not authorised for supplier and purchasing operations.".into());}
+    Ok((role,branch,business))
+}
+
+#[tauri::command]
+fn get_procurement_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String)->Result<serde_json::Value,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (role,assigned,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper","Supervisor"])?;
+    let mut bs=c.prepare("SELECT id,name,code FROM branches WHERE status='active' AND (?1 IS NULL OR id=?1) ORDER BY name").map_err(|e|e.to_string())?;
+    let branches=bs.query_map([assigned.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut ws=c.prepare("SELECT id,branch_id,name FROM warehouses WHERE status='active' AND (?1 IS NULL OR branch_id=?1) ORDER BY name").map_err(|e|e.to_string())?;
+    let warehouses=ws.query_map([assigned.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price FROM products WHERE business_id=?1 AND status='active' ORDER BY name").map_err(|e|e.to_string())?;
+    let products=ps.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut ss=c.prepare("SELECT id,name,COALESCE(contact_name,''),COALESCE(phone,''),COALESCE(email,''),COALESCE(kra_pin,''),COALESCE(address,''),active FROM suppliers WHERE business_id=?1 ORDER BY name").map_err(|e|e.to_string())?;
+    let suppliers=ss.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"contactName":r.get::<_,String>(2)?,"phone":r.get::<_,String>(3)?,"email":r.get::<_,String>(4)?,"kraPin":r.get::<_,String>(5)?,"address":r.get::<_,String>(6)?,"active":r.get::<_,i64>(7)?==1}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut os=c.prepare("SELECT id,order_number,supplier_id,supplier_name,branch_id,warehouse_id,COALESCE(invoice_number,''),COALESCE(expected_date,''),COALESCE(notes,''),items_json,total,paid_amount,payments_json,status,payment_status,created_at FROM purchase_orders WHERE business_id=?1 AND (?2 IS NULL OR branch_id=?2) ORDER BY created_at").map_err(|e|e.to_string())?;
+    let purchases=os.query_map(params![business,assigned.as_deref()],|r|{
+        let items:String=r.get(9)?;let payments:String=r.get(12)?;
+        Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"orderNumber":r.get::<_,String>(1)?,"supplierId":r.get::<_,String>(2)?,"supplierName":r.get::<_,String>(3)?,"branchId":r.get::<_,String>(4)?,"warehouseId":r.get::<_,String>(5)?,"invoiceNumber":r.get::<_,String>(6)?,"expectedDate":r.get::<_,String>(7)?,"notes":r.get::<_,String>(8)?,"items":serde_json::from_str::<serde_json::Value>(&items).unwrap_or(serde_json::json!([])),"total":r.get::<_,f64>(10)?,"paidAmount":r.get::<_,f64>(11)?,"payments":serde_json::from_str::<serde_json::Value>(&payments).unwrap_or(serde_json::json!([])),"status":r.get::<_,String>(13)?,"paymentStatus":r.get::<_,String>(14)?,"createdAt":r.get::<_,String>(15)?}))
+    }).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"role":role,"assignedBranchId":assigned,"branches":branches,"warehouses":warehouses,"products":products,"suppliers":suppliers,"purchases":purchases}))
+}
+
+#[tauri::command]
+fn save_supplier(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,id:Option<String>,name:String,contact_name:String,phone:String,email:String,kra_pin:String,address:String)->Result<serde_json::Value,String>{
+    let name=name.trim();if name.len()<2||name.len()>160{return Err("Supplier name must be between 2 and 160 characters.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let sid=id.unwrap_or_else(||Uuid::new_v4().to_string());
+    let duplicate:i64=c.query_row("SELECT COUNT(*) FROM suppliers WHERE business_id=?1 AND id<>?2 AND lower(name)=lower(?3) AND COALESCE(phone,'')=COALESCE(?4,'')",params![business,sid,name,phone.trim()],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if duplicate>0{return Err("A supplier with this name and phone number already exists.".into());}
+    let exists:i64=c.query_row("SELECT COUNT(*) FROM suppliers WHERE id=?1 AND business_id=?2",params![sid,business],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if exists>0{
+        c.execute("UPDATE suppliers SET name=?1,contact_name=?2,phone=?3,email=?4,kra_pin=?5,address=?6,updated_at=CURRENT_TIMESTAMP WHERE id=?7 AND business_id=?8",params![name,contact_name.trim(),phone.trim(),email.trim(),kra_pin.trim(),address.trim(),sid,business]).map_err(|e|e.to_string())?;
+    }else{
+        c.execute("INSERT INTO suppliers(id,business_id,name,contact_name,phone,email,kra_pin,address) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![sid,business,name,contact_name.trim(),phone.trim(),email.trim(),kra_pin.trim(),address.trim()]).map_err(|e|e.to_string())?;
+    }
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,?3,'supplier',?4,?5)",params![Uuid::new_v4().to_string(),actor_staff_id,if exists>0{"SUPPLIER_UPDATED"}else{"SUPPLIER_CREATED"},sid,serde_json::json!({"name":name,"phone":phone}).to_string()]).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":sid,"name":name,"contactName":contact_name,"phone":phone,"email":email,"kraPin":kra_pin,"address":address,"active":true}))
+}
+
+#[tauri::command]
+fn create_purchase_order(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,supplier_id:String,branch_id:String,warehouse_id:String,invoice_number:String,expected_date:String,notes:String,items:Vec<serde_json::Value>)->Result<serde_json::Value,String>{
+    if items.is_empty()||items.len()>100{return Err("Add between 1 and 100 purchase items.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,assigned,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    if assigned.as_deref().is_some_and(|b|b!=branch_id){return Err("You can only create purchase orders for your assigned branch.".into());}
+    let supplier:(String,i64)=c.query_row("SELECT name,active FROM suppliers WHERE id=?1 AND business_id=?2",params![supplier_id,business],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Select a valid supplier.".to_string())?;
+    if supplier.1!=1{return Err("This supplier is inactive.".into());}
+    let branch:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND business_id=?2 AND status='active'",params![branch_id,business],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let warehouse:i64=c.query_row("SELECT COUNT(*) FROM warehouses WHERE id=?1 AND branch_id=?2 AND status='active'",params![warehouse_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if branch==0||warehouse==0{return Err("Select an active branch and a warehouse belonging to it.".into());}
+    let mut lines=Vec::new();let mut total=0.0f64;
+    for raw in items{
+        let pid=raw["productId"].as_str().unwrap_or_default();let quantity=raw["quantity"].as_f64().unwrap_or(0.0);let unit_cost=raw["unitCost"].as_f64().unwrap_or(-1.0);
+        if !quantity.is_finite()||quantity<=0.0||!unit_cost.is_finite()||unit_cost<0.0{return Err("Each purchase item needs a positive quantity and a valid non-negative unit cost.".into());}
+        let product:Option<(String,String,String)>=c.query_row("SELECT name,sku,unit FROM products WHERE id=?1 AND business_id=?2 AND status='active'",params![pid,business],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?;
+        let (name,sku,unit)=product.ok_or_else(||"A selected product is no longer active.".to_string())?;
+        let line_total=(quantity*unit_cost*100.0).round()/100.0;total+=line_total;
+        lines.push(serde_json::json!({"productId":pid,"productName":name,"sku":sku,"unit":unit,"quantity":quantity,"receivedQuantity":0.0,"unitCost":unit_cost,"lineTotal":line_total}));
+    }
+    total=(total*100.0).round()/100.0;
+    let id=Uuid::new_v4().to_string();let order_number=format!("PO-{}",Uuid::new_v4().simple().to_string()[..10].to_uppercase());let now=chrono::Utc::now().to_rfc3339();
+    let items_json=serde_json::to_string(&lines).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO purchase_orders(id,business_id,order_number,supplier_id,supplier_name,branch_id,warehouse_id,invoice_number,expected_date,notes,items_json,total,paid_amount,payments_json,status,payment_status,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'[]','ORDERED','UNPAID',?13)",params![id,business,order_number,supplier_id,supplier.0,branch_id,warehouse_id,invoice_number.trim(),expected_date.trim(),notes.trim(),items_json,total,now]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'PURCHASE_ORDER_CREATED','purchase_order',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"orderNumber":order_number,"total":total}).to_string()]).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":id,"orderNumber":order_number,"total":total,"status":"ORDERED"}))
+}
+
+#[tauri::command]
+fn receive_purchase_goods(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,purchase_id:String,items:Vec<serde_json::Value>)->Result<serde_json::Value,String>{
+    if items.is_empty()||items.len()>100{return Err("Enter at least one product quantity to receive.".into());}
+    let mut c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
+    let tx=c.transaction().map_err(|e|e.to_string())?;
+    let row:Option<(String,String,String,String,String,f64,String,String,String)>=tx.query_row("SELECT branch_id,warehouse_id,order_number,supplier_id,invoice_number,total,items_json,business_id,status FROM purchase_orders WHERE id=?1", [&purchase_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).optional().map_err(|e|e.to_string())?;
+    let (branch,warehouse,order_number,supplier,invoice,total,items_json,order_business,status)=row.ok_or_else(||"Purchase order not found.".to_string())?;
+    if order_business!=business{return Err("Purchase order does not belong to this business.".into());}
+    if status=="CANCELLED"{return Err("A cancelled purchase order cannot receive goods.".into());}
+    ensure_branch_access(&tx,&actor_staff_id,&branch)?;ensure_branch_not_in_stocktake(&tx,&branch)?;
+    let mut lines:Vec<serde_json::Value>=serde_json::from_str(&items_json).map_err(|e|e.to_string())?;
+    let mut seen=std::collections::HashSet::new();let now=chrono::Utc::now().to_rfc3339();let mut received_total=0.0;
+    for requested in items{
+        let pid=requested["productId"].as_str().unwrap_or_default().to_string();let qty=requested["quantity"].as_f64().unwrap_or(0.0);
+        if pid.is_empty()||!seen.insert(pid.clone())||!qty.is_finite()||qty<=0.0{return Err("Each receipt line must identify one product and a positive quantity.".into());}
+        let line=lines.iter_mut().find(|x|x["productId"].as_str()==Some(pid.as_str())).ok_or_else(||"A receipt product is not part of this purchase order.".to_string())?;
+        let ordered=line["quantity"].as_f64().unwrap_or(0.0);let already=line["receivedQuantity"].as_f64().unwrap_or(0.0);let remaining=ordered-already;
+        if qty>remaining+0.000001{return Err(format!("Received quantity cannot exceed the outstanding quantity for {}.",line["productName"].as_str().unwrap_or("product")));}
+        let unit_cost=line["unitCost"].as_f64().unwrap_or(0.0);let movement_id=Uuid::new_v4().to_string();
+        tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,warehouse_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,?4,'RECEIPT',?5,?5,?6,?7,?8,?9)",params![movement_id,pid,branch,warehouse,qty,unit_cost,qty*unit_cost,format!("{} / {}",order_number,invoice),actor_staff_id]).map_err(|e|e.to_string())?;
+        line["receivedQuantity"]=serde_json::json!(already+qty);received_total+=qty*unit_cost;
+    }
+    let complete=lines.iter().all(|x|x["receivedQuantity"].as_f64().unwrap_or(0.0)+0.000001>=x["quantity"].as_f64().unwrap_or(0.0));
+    let next=if complete{"RECEIVED"}else{"PART_RECEIVED"};let updated=serde_json::to_string(&lines).map_err(|e|e.to_string())?;
+    tx.execute("UPDATE purchase_orders SET items_json=?1,status=?2,updated_at=?3 WHERE id=?4",params![updated,next,now,purchase_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'PURCHASE_GOODS_RECEIVED','purchase_order',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,purchase_id,serde_json::json!({"orderNumber":order_number,"receivedValue":received_total,"items":items}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"purchaseId":purchase_id,"status":next,"receivedValue":received_total,"total":total}))
+}
+
+#[tauri::command]
+fn record_supplier_payment(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,purchase_id:String,amount:f64,payment_method:String,reference:String)->Result<serde_json::Value,String>{
+    if !amount.is_finite()||amount<=0.0{return Err("Enter a positive supplier payment amount.".into());}
+    let method=payment_method.trim().to_uppercase();if !["CASH","MPESA","BANK"].contains(&method.as_str()){return Err("Choose Cash, M-Pesa or Bank.".into());}
+    let reference=reference.trim();if method=="MPESA"&&reference.is_empty(){return Err("Enter the M-Pesa transaction code for this payment.".into());}
+    let mut c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let tx=c.transaction().map_err(|e|e.to_string())?;
+    let row:Option<(f64,f64,String,String,String,String,String)>=tx.query_row("SELECT total,paid_amount,payments_json,order_number,supplier_name,status,business_id FROM purchase_orders WHERE id=?1", [&purchase_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|e|e.to_string())?;
+    let (total,paid,payments_json,order_number,supplier_name,status,order_business)=row.ok_or_else(||"Purchase order not found.".to_string())?;
+    if order_business!=business{return Err("Purchase order does not belong to this business.".into());}
+    let balance=(total-paid).max(0.0);if amount>balance+0.01{return Err("Payment cannot exceed the outstanding supplier balance.".into());}
+    let mut payments:Vec<serde_json::Value>=serde_json::from_str(&payments_json).unwrap_or_default();let now=chrono::Utc::now().to_rfc3339();
+    payments.push(serde_json::json!({"amount":amount,"paymentMethod":method,"reference":reference,"paidAt":now}));
+    let next_paid=((paid+amount)*100.0).round()/100.0;let pay_status=if next_paid>=total-0.01{"PAID"}else{"PART_PAID"};
+    let payments_json=serde_json::to_string(&payments).map_err(|e|e.to_string())?;
+    tx.execute("UPDATE purchase_orders SET paid_amount=?1,payments_json=?2,payment_status=?3,updated_at=?4 WHERE id=?5",params![next_paid,payments_json,pay_status,now,purchase_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id,created_at) VALUES(?1,?2,'SUPPLIER_PAYMENT','OUT',?3,?4,?5,?6,'PURCHASE_ORDER',?7,?8,?9)",params![Uuid::new_v4().to_string(),business,amount,method,reference,format!("Supplier payment to {} for {}",supplier_name,order_number),purchase_id,actor_staff_id,now]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'SUPPLIER_PAYMENT_RECORDED','purchase_order',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,purchase_id,serde_json::json!({"amount":amount,"paymentMethod":method,"reference":reference,"paymentStatus":pay_status}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"purchaseId":purchase_id,"paidAmount":next_paid,"outstanding":(total-next_paid).max(0.0),"paymentStatus":pay_status,"orderStatus":status}))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -1361,6 +1523,11 @@ pub fn run() {
             sync_desktop_workspace,
             get_pos_workspace,
             get_catalogue_workspace,
+            get_procurement_workspace,
+            save_supplier,
+            create_purchase_order,
+            receive_purchase_goods,
+            record_supplier_payment,
             save_catalogue_product,
             receive_catalogue_stock,
             create_pos_product,
