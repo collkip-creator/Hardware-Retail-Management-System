@@ -6,7 +6,8 @@ type Branch = { id: string; name: string; code?: string | null };
 type Product = { id: string; name: string; sku: string; unit: string; buyingPrice: number; sellingPrice: number };
 type Stock = { productId: string; branchId: string; quantity: number };
 type Shift = { id: string; branchId: string; openingFloat: number; openedAt: string };
-type Workspace = { role: string; assignedBranchId: string | null; branches: Branch[]; products: Product[]; stock: Stock[]; openShift: Shift | null };
+type Customer = { id: string; name: string; phone: string };
+type Workspace = { role: string; assignedBranchId: string | null; branches: Branch[]; products: Product[]; stock: Stock[]; customers: Customer[]; openShift: Shift | null };
 
 export default function PosWorkspace({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -15,6 +16,9 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
   const [basket, setBasket] = useState<{ productId: string; quantity: number; unitPrice: number }[]>([]);
   const [paymentMethod, setPaymentMethod] = useState('CASH');
   const [paymentReference, setPaymentReference] = useState('');
+  const [customerId, setCustomerId] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [customerPhone, setCustomerPhone] = useState('');
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -97,9 +101,10 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
       const result = await invoke<any>('process_pos_sale', {
         actorStaffId: session.staffId, branchId, shiftId: shift.id,
         items: basket.map(x => ({ productId: x.productId, quantity: x.quantity, unitPrice: x.unitPrice })),
-        paymentMethod, paymentReference: paymentReference || null
+        paymentMethod, paymentReference: paymentReference || null,
+        customerId: customerId || null, customerName: customerName || null, customerPhone: customerPhone || null
       });
-      setReceipt(result); setBasket([]); setPaymentReference('');
+      setReceipt(result); setBasket([]); setPaymentReference(''); setCustomerId(''); setCustomerName(''); setCustomerPhone('');
     }, 'Sale completed and stock deducted.');
   }
 
@@ -138,7 +143,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
       </form>
     </div>}
 
-    {receipt && <div className="receipt-panel"><div><strong>Sale completed</strong><span>{receipt.receiptNumber}</span></div><strong>Total: {Number(receipt.total).toFixed(2)}</strong><button className="secondary" onClick={()=>setReceipt(null)}>Dismiss receipt</button></div>}
+    {receipt && <div className="receipt-panel"><div><strong>Sale completed</strong><span>{receipt.receiptNumber}{receipt.customerName ? ' · ' + receipt.customerName : ''}</span></div><strong>Total: {Number(receipt.total).toFixed(2)}</strong><button className="secondary" onClick={()=>setReceipt(null)}>Dismiss receipt</button></div>}
     <div className="pos-main-grid">
       <section className="content-card">
         <div className="section-heading"><div><h3>Products</h3><p>{workspace.products.length} products available locally</p></div></div>
@@ -154,6 +159,8 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
           return <div className="basket-line" key={line.productId}><strong>{p.name}</strong><div className="pos-two"><label>Qty<input type="number" min="0.001" step="0.001" max={stockFor(p.id)} value={line.quantity} onChange={e=>updateLine(p.id,{quantity:Number(e.target.value)})}/></label><label>Unit price<input value={line.unitPrice.toFixed(2)} readOnly /></label></div><button className="text-button" type="button" onClick={()=>setBasket(x=>x.filter(y=>y.productId!==p.id))}>Remove</button></div>;
         })}</div>}
         <div className="pos-total"><span>Total</span><strong>{cartTotal.toFixed(2)}</strong></div>
+        <label>Saved customer (optional)<select value={customerId} onChange={e=>{const c=workspace.customers.find(x=>x.id===e.target.value);setCustomerId(e.target.value);setCustomerName(c?.name||'');setCustomerPhone(c?.phone||'');}}><option value="">Walk-in / enter customer details</option>{workspace.customers.map(c=><option key={c.id} value={c.id}>{c.name} · {c.phone}</option>)}</select></label>
+        <div className="pos-two"><label>Customer name<input value={customerName} onChange={e=>{setCustomerName(e.target.value);setCustomerId('');}} placeholder="Optional"/></label><label>Customer phone<input value={customerPhone} onChange={e=>{setCustomerPhone(e.target.value);setCustomerId('');}} placeholder="Optional"/></label></div>
         <label>Payment method<select value={paymentMethod} onChange={e=>setPaymentMethod(e.target.value)}><option value="CASH">Cash</option><option value="MPESA">M-Pesa</option></select></label>
         {paymentMethod==='MPESA'&&<label>M-Pesa transaction code<input value={paymentReference} onChange={e=>setPaymentReference(e.target.value.toUpperCase())} required/></label>}
         <button className="primary pos-checkout" disabled={busy || !shift || basket.length===0 || (paymentMethod==='MPESA'&&!paymentReference.trim()) || basket.some(x=>x.quantity<=0||x.unitPrice<0||x.quantity>stockFor(x.productId))} onClick={checkout}>Complete sale · {cartTotal.toFixed(2)}</button>
