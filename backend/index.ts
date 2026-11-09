@@ -358,7 +358,7 @@ export const handler = router({
       if (!current?.snapshot) return error('The primary computer has not synchronised the business workspace yet.', 409);
       const snapshot = JSON.parse(JSON.stringify(current.snapshot));
       const records = Array.isArray(snapshot.customers) ? snapshot.customers : [];
-      const byId = new Map(records.map((item: any) => [item.id, item]));
+      const byId = new Map<string, any>(records.map((item: any): [string, any] => [item.id, item]));
       for (const item of incoming) {
         if (!item || typeof item.id !== 'string' || typeof item.name !== 'string' || typeof item.phone !== 'string' || item.name.trim().length < 2 || !item.phone.trim()) {
           return error('Every customer needs an ID, name and phone number.', 400);
@@ -404,7 +404,7 @@ export const handler = router({
       const existing = await db.list(targetTable, { limit: 1 });
       const latestSnapshot = existing.items[0]?.snapshot;
       if (latestSnapshot && Array.isArray(latestSnapshot.customers)) {
-        const merged = new Map((Array.isArray(snapshot.customers) ? snapshot.customers : []).map((item: any) => [item.id, item]));
+        const merged = new Map<string, any>((Array.isArray(snapshot.customers) ? snapshot.customers : []).map((item: any): [string, any] => [item.id, item]));
         for (const latest of latestSnapshot.customers) {
           const incoming: any = merged.get(latest.id);
           const latestTime = Date.parse(latest.updatedAt || latest.createdAt || '') || 0;
