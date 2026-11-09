@@ -881,6 +881,17 @@ async fn pair_desktop_device(
     Ok(PairingResult { device_id, owner_device })
 }
 
+fn build_local_customer_snapshot(connection:&Connection)->Result<Vec<serde_json::Value>,String>{
+    let mut statement=connection.prepare("SELECT id,business_id,name,phone,email,address,kra_pin,notes,active,created_at,updated_at FROM customers ORDER BY created_at").map_err(|e|e.to_string())?;
+    let rows=statement.query_map([],|r|Ok(serde_json::json!({
+        "id":r.get::<_,String>(0)?,"businessId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,
+        "phone":r.get::<_,String>(3)?,"email":r.get::<_,Option<String>>(4)?,"address":r.get::<_,Option<String>>(5)?,
+        "kraPin":r.get::<_,Option<String>>(6)?,"notes":r.get::<_,Option<String>>(7)?,"active":r.get::<_,i64>(8)?==1,
+        "createdAt":r.get::<_,String>(9)?,"updatedAt":r.get::<_,Option<String>>(10)?
+    }))).map_err(|e|e.to_string())?;
+    rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
+}
+
 fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, String> {
     let business = connection.query_row(
         "SELECT id,name,currency,timezone,phone,email,address,logo_data_url FROM businesses ORDER BY created_at LIMIT 1",
@@ -906,14 +917,7 @@ fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, St
             "status":r.get::<_,String>(8)?,"mustChangePassword":r.get::<_,i64>(9)?==1}
     }))).map_err(|e|e.to_string())?;
     let staff=staff_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let mut customer_statement=connection.prepare("SELECT id,business_id,name,phone,email,address,kra_pin,notes,active,created_at,updated_at FROM customers ORDER BY created_at").map_err(|e|e.to_string())?;
-    let customer_rows=customer_statement.query_map([],|r|Ok(serde_json::json!({
-        "id":r.get::<_,String>(0)?,"businessId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,
-        "phone":r.get::<_,String>(3)?,"email":r.get::<_,Option<String>>(4)?,"address":r.get::<_,Option<String>>(5)?,
-        "kraPin":r.get::<_,Option<String>>(6)?,"notes":r.get::<_,Option<String>>(7)?,"active":r.get::<_,i64>(8)?==1,
-        "createdAt":r.get::<_,String>(9)?,"updatedAt":r.get::<_,Option<String>>(10)?
-    }))).map_err(|e|e.to_string())?;
-    let customers=customer_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let customers=build_local_customer_snapshot(connection)?;
     Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers}))
 }
 
@@ -993,14 +997,15 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
 
 #[tauri::command]
 async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Result<SyncResult, String> {
-    let (token, owner_device, snapshot, pending_passwords) = {
+    let (token, owner_device, snapshot, pending_passwords, customers) = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         let token=read_sync_value(&connection,"device_token")?.ok_or_else(||"Pair this computer with the online owner portal first.".to_string())?;
         let owner=read_sync_value(&connection,"owner_device")?.unwrap_or_default()=="true";
         let snapshot=if owner { Some(build_local_snapshot(&connection)?) } else { None };
         let pending: Vec<serde_json::Value> = read_sync_value(&connection,"pending_password_sync")?
             .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
-        (token,owner,snapshot,pending)
+        let customers=build_local_customer_snapshot(&connection)?;
+        (token,owner,snapshot,pending,customers)
     };
     let client=reqwest::Client::new();
     let mut pending_applied = pending_passwords.is_empty();
@@ -1032,6 +1037,13 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
     if let Some(remote) = push_snapshot {
         let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         apply_remote_snapshot(&mut connection,&remote)?;
+    }
+    if !owner_device && !customers.is_empty() {
+        let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/customers")).bearer_auth(&token)
+            .json(&serde_json::json!({"customers":customers})).send().await
+            .map_err(|e|format!("Could not synchronise customer records: {e}"))?;
+        let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+        if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Customer records could not be synchronised.").to_string());}
     }
     let response=client.get(format!("{DESKTOP_API_BASE}/desktop/sync/pull")).bearer_auth(&token).send().await
         .map_err(|e|format!("Could not download the latest business data: {e}"))?;
