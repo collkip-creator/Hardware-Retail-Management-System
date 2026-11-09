@@ -958,7 +958,6 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
     let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
     let products=ps.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut stock=Vec::new();
-    let mut valuation=Vec::new();
     for p in &products {
         let pid=p["id"].as_str().unwrap_or_default();
         let mut st=c.prepare("SELECT branch_id,COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 GROUP BY branch_id").map_err(|e|e.to_string())?;
