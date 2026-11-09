@@ -499,6 +499,35 @@ fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Result<D
     Ok(DeviceSyncStatus { paired: token.is_some(), owner_device: owner, last_sync_at: last })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingCodeResult { code: String, expires_at: String, owner_device: bool }
+
+#[tauri::command]
+async fn generate_desktop_pairing_code(database: tauri::State<'_, LocalDatabase>) -> Result<PairingCodeResult, String> {
+    let (token, owner_device) = {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        let token = read_sync_value(&connection, "device_token")?.ok_or_else(|| "Pair the primary computer before generating additional device codes.".to_string())?;
+        let owner = read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true";
+        (token, owner)
+    };
+    if !owner_device { return Err("Only the primary Business Owner computer can generate pairing codes.".into()); }
+    let client = reqwest::Client::new();
+    let response = client.post(format!("{DESKTOP_API_BASE}/desktop/pairings/issue"))
+        .bearer_auth(&token).json(&serde_json::json!({})).send().await
+        .map_err(|e| format!("Could not reach the licensing and sync service: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| format!("The cloud service returned an unreadable response: {e}"))?;
+    if !status.is_success() {
+        return Err(body.get("error").and_then(|v| v.as_str()).unwrap_or("Could not generate a pairing code.").to_string());
+    }
+    Ok(PairingCodeResult {
+        code: body.get("code").and_then(|v| v.as_str()).ok_or_else(|| "The cloud service did not return a pairing code.".to_string())?.to_string(),
+        expires_at: body.get("expiresAt").and_then(|v| v.as_str()).ok_or_else(|| "The cloud service did not return an expiry time.".to_string())?.to_string(),
+        owner_device: body.get("ownerDevice").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
 #[tauri::command]
 async fn pair_desktop_device(
     database: tauri::State<'_, LocalDatabase>,
@@ -705,6 +734,7 @@ pub fn run() {
             change_staff_password,
             get_device_sync_status,
             pair_desktop_device,
+            generate_desktop_pairing_code,
             sync_desktop_workspace
         ])
         .run(tauri::generate_context!())
