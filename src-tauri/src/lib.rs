@@ -497,17 +497,20 @@ async fn activate_desktop_licence(
     licence_key: String,
     device_name: String,
 ) -> Result<serde_json::Value, String> {
-    let (device_id, already_activated) = {
+    let (device_id, already_activated, existing_business_id) = {
         let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
         let id: String = connection.query_row("SELECT value FROM app_meta WHERE key='device_id'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-        (id, read_sync_value(&connection, "device_token")?.is_some())
+        let business_id: Option<String> = connection.query_row(
+            "SELECT id FROM businesses ORDER BY created_at LIMIT 1", [], |row| row.get(0)
+        ).optional().map_err(|e| e.to_string())?;
+        (id, read_sync_value(&connection, "device_token")?.is_some(), business_id)
     };
     if already_activated { return Err("This computer is already activated or paired.".into()); }
     let key = licence_key.trim().to_uppercase();
     if key.len() < 12 || key.len() > 100 || !key.starts_with("HRMS-") { return Err("Enter a valid licence key.".into()); }
     let client = reqwest::Client::new();
     let response = client.post(format!("{DESKTOP_API_BASE}/desktop/licences/activate"))
-        .json(&serde_json::json!({"licenceKey":key,"deviceId":device_id,"deviceName":device_name.trim()}))
+        .json(&serde_json::json!({"licenceKey":key,"deviceId":device_id,"deviceName":device_name.trim(),"businessId":existing_business_id}))
         .send().await.map_err(|e| format!("Could not reach the licence activation service: {e}"))?;
     let status = response.status();
     let body: serde_json::Value = response.json().await.map_err(|e| format!("The licence service returned an unreadable response: {e}"))?;
