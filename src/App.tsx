@@ -133,7 +133,8 @@ function App() {
   const [receiveQuantities, setReceiveQuantities] = useState<Record<string, string>>({});
   const [refundSettlement, setRefundSettlement] = useState<Record<string, { paymentMethod: string; reference: string }>>({});
   const [customerSearch, setCustomerSearch] = useState('');
-  const [discountApproval, setDiscountApproval] = useState({ managerName: '', reason: '' });
+  const [discountApproval, setDiscountApproval] = useState({ managerId: '', pin: '', reason: '' });
+  const [managerPinInputs, setManagerPinInputs] = useState<Record<string, string>>({});
   const [returnForm, setReturnForm] = useState({ saleId: '', productId: '', quantity: '1', condition: 'RESTOCK', refundMethod: 'CASH', reason: '' });
   const [posCart, setPosCart] = useState<any[]>([]);
   const [posSearch, setPosSearch] = useState('');
@@ -141,6 +142,8 @@ function App() {
   const [shift, setShift] = useState<any>(null);
   const [shiftFloat, setShiftFloat] = useState('0');
   const [shiftClosingCash, setShiftClosingCash] = useState('0');
+  const [shiftClosingMpesa, setShiftClosingMpesa] = useState('0');
+  const [lastClosedShift, setLastClosedShift] = useState<any>(null);
   const [receiptSale, setReceiptSale] = useState<any>(null);
   const [productSearch, setProductSearch] = useState('');
   const [productCategory, setProductCategory] = useState('All categories');
@@ -451,20 +454,27 @@ function App() {
     try {              const result = await api.post('/api/sales', { branchId: posForm.branchId, warehouseId: posForm.warehouseId, customerId: (posForm as any).customerId || '', customerName: posForm.customerName, customerPhone: posForm.customerPhone, items: posCart.map(item => ({ productId: item.productId, quantity: Number(item.quantity), unitPrice: Number(item.unitPrice), discountPercent: Number(item.discountPercent || 0) })), payments, shiftId: shift.id, discountApproval: hasDiscount ? discountApproval : null });
       setReceiptSale(result.data.sale);
       setPosCart([]);
-      setDiscountApproval({ managerName: '', reason: '' });
+      setDiscountApproval({ managerId: '', pin: '', reason: '' });
       setPosForm({ ...posForm, customerName: '', customerPhone: '', cashAmount: '', mpesaAmount: '', mpesaReference: '' });
       setNotice('Sale completed. Stock has been deducted and the receipt is ready.');
       await loadWorkspace();
     } catch (e: any) { setError(e?.response?.data?.error || e.message || 'Could not complete sale.'); }
   }
   async function openShift() {
-    try { const r = await api.post('/api/pos/shifts/open', { branchId: posForm.branchId, openingFloat: Number(shiftFloat || 0) }); setShift(r.data.shift); setNotice('Cashier shift opened.'); }
+    try { const r = await api.post('/api/pos/shifts/open', { branchId: posForm.branchId, openingFloat: Number(shiftFloat || 0) }); setShift(r.data.shift); setLastClosedShift(null); setShiftClosingCash('0'); setShiftClosingMpesa('0'); setNotice('Cashier shift opened.'); }
     catch (e: any) { setError(e?.response?.data?.error || e.message || 'Could not open shift.'); }
   }
   async function closeShift() {
     if (!shift) return;
-    try { await api.post('/api/pos/shifts/' + shift.id + '/close', { closingCash: Number(shiftClosingCash || 0) }); setShift(null); setNotice('Cashier shift closed.'); await loadWorkspace(); }
+    try { const result = await api.post('/api/pos/shifts/' + shift.id + '/close', { closingCash: Number(shiftClosingCash || 0), closingMpesa: Number(shiftClosingMpesa || 0) }); setLastClosedShift(result.data.reconciliation); setShift(null); setNotice('Cashier shift closed. Review the reconciliation summary for any cash or M-Pesa variance.'); await loadWorkspace(); }
     catch (e: any) { setError(e?.response?.data?.error || e.message || 'Could not close shift.'); }
+  }
+  async function saveDiscountPin(managerId: string) {
+    const pin = managerPinInputs[managerId] || '';
+    if (!/^\d{6}$/.test(pin)) { setError('Enter a six-digit manager approval PIN.'); return; }
+    setError(''); setNotice('');
+    try { await api.put('/api/team/' + managerId + '/discount-pin', { pin }); setManagerPinInputs({ ...managerPinInputs, [managerId]: '' }); setNotice('Discount approval PIN saved securely. The PIN itself is never displayed again.'); await loadWorkspace(); }
+    catch (e: any) { setError(e?.response?.data?.error || e.message || 'Could not save manager PIN.'); }
   }
   async function saveSupplier(e: React.FormEvent) {
     e.preventDefault(); setError(''); setNotice('');
@@ -1472,15 +1482,8 @@ function App() {
                     <span className="default-tag">OWNER</span>                  </div>
                   {staff.map(s => (
                     <div className="record-row" key={s.id}>
-                      <div className="record-icon">
-                        <Users size={18} />
-                      </div>
-                      <div className="record-copy">
-                        <strong>{s.name}</strong>
-                        <small>
-                          {s.role} · {s.email}
-                        </small>
-                      </div>
+                      <div className="record-icon"><Users size={18} /></div>
+                      <div className="record-copy"><strong>{s.name}</strong><small>{s.role} · {s.email}</small>{s.role === 'Branch Manager' && <div className="form-grid"><input aria-label={'Six-digit discount PIN for ' + s.name} type="password" inputMode="numeric" maxLength={6} placeholder="Set six-digit discount PIN" value={managerPinInputs[s.id] || ''} onChange={e=>setManagerPinInputs({...managerPinInputs,[s.id]:e.target.value.replace(/\D/g,'').slice(0,6)})}/><button className="secondary-button" onClick={()=>saveDiscountPin(s.id)}>Save approval PIN</button><small>{s.discountPinConfigured ? 'Discount approval PIN configured. Enter a new PIN to replace it.' : 'No discount approval PIN configured yet.'}</small></div>}</div>
                       <span className="pending-tag">PROFILE</span>
                     </div>
                   ))}
@@ -1585,13 +1588,14 @@ function App() {
                   <label className="field"><span>Customer name (optional)</span><input value={posForm.customerName} onChange={e => setPosForm({ ...posForm, customerName: e.target.value })} /></label>
                   <label className="field"><span>Customer phone (optional)</span><input value={posForm.customerPhone} onChange={e => setPosForm({ ...posForm, customerPhone: e.target.value })} /></label>
                 </div>
-                {hasDiscount && <div className="discount-approval"><div className="form-section-title">Manager discount approval required</div><div className="form-grid"><label className="field"><span>Approving manager name *</span><input value={discountApproval.managerName} onChange={e=>setDiscountApproval({...discountApproval,managerName:e.target.value})} placeholder="Manager's name"/></label><label className="field"><span>Reason for discount *</span><input value={discountApproval.reason} onChange={e=>setDiscountApproval({...discountApproval,reason:e.target.value})} placeholder="e.g. bulk purchase"/></label></div><small>Approval details are saved with the sale for audit review.</small></div>}
+                {hasDiscount && <div className="discount-approval"><div className="form-section-title">Authenticated manager approval required</div><div className="form-grid"><label className="field"><span>Approving Branch Manager *</span><select value={discountApproval.managerId} onChange={e=>setDiscountApproval({...discountApproval,managerId:e.target.value})}><option value="">Select configured manager</option>{staff.filter((member:any)=>member.role==='Branch Manager' && member.discountPinConfigured).map((member:any)=><option key={member.id} value={member.id}>{member.name}</option>)}</select></label><label className="field"><span>Manager six-digit PIN *</span><input type="password" inputMode="numeric" maxLength={6} value={discountApproval.pin} onChange={e=>setDiscountApproval({...discountApproval,pin:e.target.value.replace(/\D/g,'').slice(0,6)})} autoComplete="off" placeholder="••••••"/></label><label className="field"><span>Reason for discount *</span><input value={discountApproval.reason} onChange={e=>setDiscountApproval({...discountApproval,reason:e.target.value})} placeholder="e.g. bulk purchase"/></label></div><small>The server verifies the manager PIN and records the approving manager in the audit trail.</small></div>}
                 <div className="pos-total"><span>Sale total after discounts</span><strong>KSh {posTotal.toLocaleString('en-KE',{maximumFractionDigits:2})}</strong></div>
                 <div className="form-section-title">Payment split</div>
                 <div className="form-grid"><label className="field"><span>Cash received (KSh)</span><input type="number" min="0" step="0.01" value={posForm.cashAmount} onChange={e=>setPosForm({...posForm,cashAmount:e.target.value})}/></label><label className="field"><span>M-Pesa received (KSh)</span><input type="number" min="0" step="0.01" value={posForm.mpesaAmount} onChange={e=>setPosForm({...posForm,mpesaAmount:e.target.value})}/></label><label className="field"><span>M-Pesa transaction code</span><input value={posForm.mpesaReference} onChange={e=>setPosForm({...posForm,mpesaReference:e.target.value})}/></label></div>
                 <div className="pos-payment-status">Paid: KSh {posPaid.toLocaleString('en-KE')} · Balance: KSh {(posTotal-posPaid).toLocaleString('en-KE',{maximumFractionDigits:2})}</div>
-                <button className="primary-button full" onClick={completeSale} disabled={!posCart.length || !shift || (hasDiscount && (!discountApproval.managerName.trim() || !discountApproval.reason.trim())) || posCart.some(item=>Number(item.discountPercent)<0 || Number(item.discountPercent)>100) || Math.abs(posPaid-posTotal)>0.01}>Complete sale & issue receipt</button>
-                <div className="pos-shift"><div><strong>Cashier shift</strong><small>{shift ? 'Open since '+new Date(shift.openedAt).toLocaleString() : 'No active shift'}</small></div>{shift ? <><label className="field"><span>Closing cash counted (KSh)</span><input type="number" min="0" value={shiftClosingCash} onChange={e=>setShiftClosingCash(e.target.value)}/></label><button className="secondary-button" onClick={closeShift}>Close shift</button></> : <><label className="field"><span>Opening float (KSh)</span><input type="number" min="0" value={shiftFloat} onChange={e=>setShiftFloat(e.target.value)}/></label><button className="secondary-button" onClick={openShift} disabled={!posForm.branchId}>Open shift</button></>}</div>
+                <button className="primary-button full" onClick={completeSale} disabled={!posCart.length || !shift || (hasDiscount && (!discountApproval.managerId || !/^\d{6}$/.test(discountApproval.pin) || !discountApproval.reason.trim())) || posCart.some(item=>Number(item.discountPercent)<0 || Number(item.discountPercent)>100) || Math.abs(posPaid-posTotal)>0.01}>Complete sale & issue receipt</button>
+                <div className="pos-shift"><div><strong>Cashier shift</strong><small>{shift ? 'Open since '+new Date(shift.openedAt).toLocaleString() : 'No active shift'}</small></div>{shift ? <><label className="field"><span>Closing cash counted (KSh)</span><input type="number" min="0" value={shiftClosingCash} onChange={e=>setShiftClosingCash(e.target.value)}/></label><label className="field"><span>Closing M-Pesa statement total (KSh)</span><input type="number" min="0" value={shiftClosingMpesa} onChange={e=>setShiftClosingMpesa(e.target.value)}/></label><button className="secondary-button" onClick={closeShift}>Close & reconcile shift</button></> : <><label className="field"><span>Opening float (KSh)</span><input type="number" min="0" value={shiftFloat} onChange={e=>setShiftFloat(e.target.value)}/></label><button className="secondary-button" onClick={openShift} disabled={!posForm.branchId}>Open shift</button></>}</div>
+                {!shift && lastClosedShift && <div className="reconciliation-summary"><strong>Last shift reconciliation</strong><div className="ledger-row"><span>Expected cash · Counted cash</span><strong>KSh {Number(lastClosedShift.expectedCash).toLocaleString('en-KE')} · {Number(lastClosedShift.closingCash).toLocaleString('en-KE')}</strong></div><div className="ledger-row"><span>Cash variance</span><strong>KSh {Number(lastClosedShift.cashVariance).toLocaleString('en-KE')}</strong></div><div className="ledger-row"><span>Expected M-Pesa · Counted M-Pesa</span><strong>KSh {Number(lastClosedShift.expectedMpesa).toLocaleString('en-KE')} · {Number(lastClosedShift.closingMpesa).toLocaleString('en-KE')}</strong></div><div className="ledger-row"><span>M-Pesa variance</span><strong>KSh {Number(lastClosedShift.mpesaVariance).toLocaleString('en-KE')}</strong></div><div className="ledger-row"><span>Total variance</span><strong>KSh {Number(lastClosedShift.totalVariance).toLocaleString('en-KE')}</strong></div></div>}
               </section>
               <section className="panel pos-history"><div className="panel-heading"><div><h3>Recent sales</h3><p>Completed transactions in this business.</p></div></div>{sales.slice(-10).reverse().map(s=><div className="ledger-row" key={s.id}><span>{s.receiptNumber} · {s.customerName || 'Walk-in customer'} · {new Date(s.createdAt).toLocaleString()}</span><strong>KSh {Number(s.total).toLocaleString('en-KE')}</strong><button className="text-button" onClick={()=>printReceipt(s)}>Print receipt</button></div>)}</section>
               <section className="panel pos-history"><div className="panel-heading"><div><h3>Returns & refunds</h3><p>Find the original sale, select the returned item and record its condition.</p></div><span className="count-pill">{returns.length} returns</span></div>
