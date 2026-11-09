@@ -8,7 +8,7 @@ type Branch = { id: string; name: string; code: string | null; status: string };
 type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
 type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
 type Tab = 'overview' | 'business' | 'branches' | 'staff' | 'devices';
-type SyncStatus = { paired: boolean; ownerDevice: boolean; lastSyncAt: string | null };
+type SyncStatus = { paired: boolean; ownerDevice: boolean; licenceActive: boolean; lastSyncAt: string | null };
 type SyncResult = { ownerDevice: boolean; updatedAt: string; branches: number; staff: number };
 type PairingCodeResult = { code: string; expiresAt: string; ownerDevice: boolean };
 
@@ -37,7 +37,7 @@ export default function DesktopApp() {
   const [newStaffRole, setNewStaffRole] = useState('Cashier');
   const [newStaffBranch, setNewStaffBranch] = useState('');
   const [credentials, setCredentials] = useState<{ username: string; temporaryPassword: string } | null>(null);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ paired: false, ownerDevice: false, lastSyncAt: null });
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ paired: false, ownerDevice: false, licenceActive: false, lastSyncAt: null });
   const [licenceKey, setLicenceKey] = useState('');
   const [pairingCode, setPairingCode] = useState('');
   const [pairingResult, setPairingResult] = useState<PairingCodeResult | null>(null);
@@ -242,6 +242,7 @@ export default function DesktopApp() {
     </aside>
     <section className="main-area"><header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{nav.find(n=>n.id===tab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0,1).toUpperCase()}</span><span>{session.displayName}<small>Business Owner</small></span></div></header>
       {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
+      {!syncStatus.licenceActive && syncStatus.ownerDevice && <div className="content-card licence-activation-card"><div className="section-heading"><div><h2>Activate your business licence</h2><p>Link this existing primary computer and Business Owner workspace to the Collkip licence. Your local business and staff accounts will be preserved.</p></div></div><form className="inline-form" onSubmit={activateLicence}><label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label><button className="primary" type="submit" disabled={busy||!online||licenceKey.trim().length<12}>{busy?'Activating…':'Activate licence'}</button></form></div>}
       {!business?<div className="panel"><p>Loading your business workspace…</p></div>:<>
       {tab==='overview'&&<><div className="welcome-card"><div><p className="eyebrow">YOUR BUSINESS WORKSPACE</p><h2>{business.name}</h2><p>Manage your business details, branches, staff accounts and authorised computers from one place.</p></div><div className="welcome-mark">HR</div></div>
         <div className="metric-grid"><Metric label="Branches" value={branches.length} hint="Registered locations"/><Metric label="Staff accounts" value={staff.length} hint="Local accounts on this device"/><Metric label="Authorised devices" value={devices.length} hint="Device records on this computer"/></div>
@@ -256,7 +257,6 @@ export default function DesktopApp() {
         {credentials&&<div className="credential-box"><h3>New staff login credentials</h3><p>Share these details securely with the staff member. The temporary password is displayed only this once.</p><div className="credential-line"><span>Username</span><strong>{credentials.username}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.username)}>Copy</button></div><div className="credential-line"><span>Temporary password</span><strong>{credentials.temporaryPassword}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.temporaryPassword)}>Copy</button></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(`Username: ${credentials.username}\nTemporary password: ${credentials.temporaryPassword}`)}>Copy both credentials</button></div>}
       </div><div className="content-card"><div className="section-heading"><div><h2>Staff accounts</h2><p>{staff.length} account(s) stored on this computer.</p></div></div>{staff.length===0?<Empty text="No staff accounts have been created yet."/>:<DataTable headers={['Name','Username','Role','Status']} rows={staff.map(s=>[s.displayName,s.username,s.role,s.status])}/>}</div></>}
       {tab==='devices'&&<div className="content-card"><div className="section-heading"><div><h2>Computer devices</h2><p>Manage authorised computers for this business. Only the primary computer can generate pairing codes.</p></div></div>
-        {!syncStatus.paired&&<div className="pair-device-card"><h2>Activate business licence</h2><p>This existing Business Owner workspace has not yet been linked to a Collkip licence. Activate it here without creating another local owner account.</p><form onSubmit={activateLicence}><label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label><button className="primary" type="submit" disabled={busy||!online||licenceKey.trim().length<12}>{busy?'Activating…':'Activate licence'}</button></form></div>}
         <div className="device-sync-status"><strong>{syncStatus.paired?'Paired with owner portal':'Not yet paired'}</strong><span>{syncStatus.paired?(syncStatus.ownerDevice?'Primary owner computer':'Additional business computer'):'The Business Owner generates a code on the primary computer.'}</span><small>Last successful sync: {syncStatus.lastSyncAt?new Date(syncStatus.lastSyncAt).toLocaleString():'Not yet synchronised'}</small></div>
         {!syncStatus.paired&&<form className="inline-form" onSubmit={pairThisComputer}><label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label><button className="primary" disabled={busy||syncing||pairingCode.length!==8||!online}>Pair this computer</button></form>}
         {syncStatus.paired&&<div className="device-actions">
