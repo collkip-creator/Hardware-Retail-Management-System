@@ -116,6 +116,46 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             details_json TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS products (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            name TEXT NOT NULL, sku TEXT NOT NULL, unit TEXT NOT NULL,
+            buying_price REAL NOT NULL DEFAULT 0, selling_price REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(business_id, sku)
+        );
+        CREATE TABLE IF NOT EXISTS warehouses (
+            id TEXT PRIMARY KEY, branch_id TEXT NOT NULL REFERENCES branches(id),
+            name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS stock_movements (
+            id TEXT PRIMARY KEY, product_id TEXT NOT NULL REFERENCES products(id),
+            branch_id TEXT NOT NULL REFERENCES branches(id), warehouse_id TEXT REFERENCES warehouses(id),
+            movement_type TEXT NOT NULL CHECK(movement_type IN ('RECEIPT','SALE','RETURN','ADJUSTMENT')),
+            quantity REAL NOT NULL CHECK(quantity > 0), unit_cost REAL NOT NULL DEFAULT 0,
+            total_cost REAL NOT NULL DEFAULT 0, reference TEXT, actor_staff_id TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_local_stock_lookup ON stock_movements(product_id,branch_id,created_at);
+        CREATE TABLE IF NOT EXISTS pos_shifts (
+            id TEXT PRIMARY KEY, branch_id TEXT NOT NULL REFERENCES branches(id),
+            cashier_staff_id TEXT NOT NULL REFERENCES staff_profiles(id), opening_float REAL NOT NULL DEFAULT 0,
+            closing_cash REAL, closing_mpesa REAL, status TEXT NOT NULL DEFAULT 'OPEN',
+            opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, closed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sales (
+            id TEXT PRIMARY KEY, receipt_number TEXT NOT NULL UNIQUE, branch_id TEXT NOT NULL REFERENCES branches(id),
+            shift_id TEXT NOT NULL REFERENCES pos_shifts(id), cashier_staff_id TEXT NOT NULL REFERENCES staff_profiles(id),
+            total REAL NOT NULL, payment_method TEXT NOT NULL, payment_reference TEXT,
+            status TEXT NOT NULL DEFAULT 'COMPLETED', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS sale_items (
+            id TEXT PRIMARY KEY, sale_id TEXT NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL REFERENCES products(id), product_name TEXT NOT NULL,
+            quantity REAL NOT NULL, unit_price REAL NOT NULL, unit_cost REAL NOT NULL DEFAULT 0,
+            line_total REAL NOT NULL
+        );
+
         ",
     ).map_err(|e| e.to_string())?;
 
@@ -862,6 +902,115 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
     Ok(SyncResult{owner_device,updated_at,branches,staff})
 }
 
+
+#[tauri::command]
+fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: String) -> Result<serde_json::Value, String> {
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let actor: Option<(String,Option<String>)>=c.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+    let (role,assigned_branch)=actor.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
+    let mut bs=c.prepare("SELECT id,name,code FROM branches WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
+    let branches=bs.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
+    let products=ps.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut stock=Vec::new();
+    for p in &products {
+        let pid=p["id"].as_str().unwrap_or_default();
+        let mut st=c.prepare("SELECT branch_id,COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 GROUP BY branch_id").map_err(|e|e.to_string())?;
+        let rows=st.query_map([pid],|r|Ok(serde_json::json!({"branchId":r.get::<_,String>(0)?,"quantity":r.get::<_,f64>(1)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        for row in rows { stock.push(serde_json::json!({"productId":pid,"branchId":row["branchId"],"quantity":row["quantity"]})); }
+    }
+    let open_shift: Option<serde_json::Value>=c.query_row("SELECT id,branch_id,opening_float,opened_at FROM pos_shifts WHERE cashier_staff_id=?1 AND status='OPEN' ORDER BY opened_at DESC LIMIT 1",[&actor_staff_id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"openingFloat":r.get::<_,f64>(2)?,"openedAt":r.get::<_,String>(3)?}))).optional().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"role":role,"assignedBranchId":assigned_branch,"branches":branches,"products":products,"stock":stock,"openShift":open_shift}))
+}
+
+#[tauri::command]
+fn create_pos_product(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,name:String,sku:String,unit:String,buying_price:f64,selling_price:f64)->Result<serde_json::Value,String>{
+    let name=name.trim();let sku=sku.trim().to_uppercase();let unit=unit.trim();
+    if name.len()<2||name.len()>160||sku.len()<2||sku.len()>60||unit.is_empty()||unit.len()>30{return Err("Enter a product name, SKU and stock unit.".into());}
+    if !buying_price.is_finite()||buying_price<0||!selling_price.is_finite()||selling_price<0{return Err("Enter valid non-negative prices.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can add products.".into());}
+    let business:String=c.query_row("SELECT id FROM businesses ORDER BY created_at LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let id=Uuid::new_v4().to_string();
+    c.execute("INSERT INTO products(id,business_id,name,sku,unit,buying_price,selling_price) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,business,name,sku,unit,buying_price,selling_price]).map_err(|e|if e.to_string().contains("UNIQUE"){"That SKU is already in use.".to_string()}else{e.to_string()})?;
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'PRODUCT_CREATED','product',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"name":name,"sku":sku}).to_string()]).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":id,"name":name,"sku":sku,"unit":unit,"buyingPrice":buying_price,"sellingPrice":selling_price}))
+}
+
+#[tauri::command]
+fn receive_pos_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,product_id:String,branch_id:String,quantity:f64,unit_cost:f64,reference:Option<String>)->Result<(),String>{
+    if !quantity.is_finite()||quantity<=0||!unit_cost.is_finite()||unit_cost<0{return Err("Enter a positive quantity and a valid unit cost.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can receive stock.".into());}
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let branch:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if valid==0||branch==0{return Err("Select a valid product and active branch.".into());}
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    let movement=Uuid::new_v4().to_string();
+    tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'RECEIPT',?4,?5,?6,?7,?8)",params![movement,product_id,branch_id,quantity,unit_cost,quantity*unit_cost,reference,actor_staff_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCK_RECEIVED','stock_movement',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,movement,serde_json::json!({"productId":product_id,"branchId":branch_id,"quantity":quantity,"unitCost":unit_cost}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,opening_float:f64)->Result<serde_json::Value,String>{
+    if !opening_float.is_finite()||opening_float<0{return Err("Enter a valid non-negative opening float.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let role:Option<(String,Option<String>)>=c.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+    let (role,assigned)=role.ok_or_else(||"Staff account is inactive.".to_string())?;
+    if !["Business Owner","Manager","Cashier","Supervisor"].contains(&role.as_str()){return Err("Your role is not permitted to operate the POS.".into());}
+    if assigned.as_deref().is_some_and(|id|id!=branch_id){return Err("You can only open a shift at your assigned branch.".into());}
+    let exists:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if exists==0{return Err("Select an active branch.".into());}
+    let open:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE cashier_staff_id=?1 AND status='OPEN'",[&actor_staff_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if open>0{return Err("You already have an open cashier shift.".into());}
+    let id=Uuid::new_v4().to_string();
+    c.execute("INSERT INTO pos_shifts(id,branch_id,cashier_staff_id,opening_float) VALUES(?1,?2,?3,?4)",params![id,branch_id,actor_staff_id,opening_float]).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":id,"branchId":branch_id,"openingFloat":opening_float,"status":"OPEN"}))
+}
+
+#[tauri::command]
+fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,payment_reference:Option<String>)->Result<serde_json::Value,String>{
+    if items.is_empty()||items.len()>80{return Err("Add between 1 and 80 sale lines.".into());}
+    let method=payment_method.trim().to_uppercase();
+    if !["CASH","MPESA"].contains(&method.as_str()){return Err("Select Cash or M-Pesa.".into());}
+    if method=="MPESA"&&payment_reference.as_deref().unwrap_or("").trim().is_empty(){return Err("Enter the M-Pesa transaction reference.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    let mut total=0.0f64;let mut lines=Vec::new();
+    for item in &items{
+        let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;
+        let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;
+        if !qty.is_finite()||qty<=0{return Err("Sale quantities must be greater than zero.".into());}
+        let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
+        let stock:f64=tx.query_row("SELECT COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();
+        if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0));}
+        let price=item["unitPrice"].as_f64().unwrap_or(product.2);
+        if !price.is_finite()||price<0{return Err("Sale price cannot be negative.".into());}
+        let line_total=(qty*price*100.0).round()/100.0;total+=line_total;
+        let unit_cost=product.3;
+        lines.push(serde_json::json!({"productId":pid,"name":product.0,"quantity":qty,"unitPrice":price,"unitCost":unit_cost,"lineTotal":line_total}));
+    }
+    total=(total*100.0).round()/100.0;
+    let receipt=format!("HR-{}",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>().to_uppercase());
+    let sale_id=Uuid::new_v4().to_string();
+    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference]).map_err(|e|e.to_string())?;
+    for line in &lines{
+        let item_id=Uuid::new_v4().to_string();
+        tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item_id,sale_id,line["productId"].as_str(),line["name"].as_str(),line["quantity"].as_f64(),line["unitPrice"].as_f64(),line["unitCost"].as_f64(),line["lineTotal"].as_f64()]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'SALE',?4,?5,?6,?7,?8)",params![Uuid::new_v4().to_string(),line["productId"].as_str(),branch_id,line["quantity"].as_f64(),line["unitCost"].as_f64(),line["quantity"].as_f64().unwrap_or(0.0)*line["unitCost"].as_f64().unwrap_or(0.0),receipt,actor_staff_id]).map_err(|e|e.to_string())?;
+    }
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SALE_COMPLETED','sale',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,sale_id,serde_json::json!({"receiptNumber":receipt,"total":total,"paymentMethod":method}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"total":total,"paymentMethod":method,"items":lines}))
+}
+
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -887,7 +1036,12 @@ pub fn run() {
             activate_desktop_licence,
             pair_desktop_device,
             generate_desktop_pairing_code,
-            sync_desktop_workspace
+            sync_desktop_workspace,
+            get_pos_workspace,
+            create_pos_product,
+            receive_pos_stock,
+            open_pos_shift,
+            process_pos_sale
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
