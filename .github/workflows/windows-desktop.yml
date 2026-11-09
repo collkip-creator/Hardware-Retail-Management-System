@@ -8,6 +8,7 @@ on:
       - feature/offline-pos-foundation
       - feature/advanced-inventory-phase7
       - feature/catalogue-stock-ui-parity
+      - feature/suppliers-purchasing-ui-parity
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
