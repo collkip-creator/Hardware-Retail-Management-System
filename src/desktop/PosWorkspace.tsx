@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 type Session = { staffId: string; displayName: string; role: string; branchId: string | null };
@@ -63,7 +63,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
     catch (e) { setError(String(e).replace(/^Error: /, '')); }
     finally { setBusy(false); }
   }
-  async function createProduct(e: React.FormEvent) {
+  async function createProduct(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
       const p = await invoke<Product>('create_pos_product', {
@@ -74,7 +74,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
       setReceiveProduct(p.id);
     }, 'Product saved to this computer.');
   }
-  async function receiveStock(e: React.FormEvent) {
+  async function receiveStock(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
       if (!branchId) throw new Error('Create a branch before receiving stock.');
@@ -85,7 +85,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
       setReceiveQuantity(''); setReceiveCost('');
     }, 'Stock received and recorded locally.');
   }
-  async function openShift(e: React.FormEvent) {
+  async function openShift(e: FormEvent) {
     e.preventDefault();
     await run(async () => {
       await invoke('open_pos_shift', { actorStaffId: session.staffId, branchId, openingFloat: Number(openingFloat) });
@@ -113,7 +113,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
     {error && <p className="error global-message">{error}</p>}
     {notice && <p className="success global-message">{notice}</p>}
     <div className="pos-toolbar">
-      <label>Branch<select value={branchId} onChange={e=>{setBranchId(e.target.value);setBasket([]);}} disabled={Boolean(workspace.assignedBranchId)}>
+      <label>Branch<select value={branchId} onChange={e=>{setBranchId(e.target.value);setBasket([]);}} disabled={Boolean(workspace.assignedBranchId || workspace.openShift)}>
         <option value="">Select branch</option>{workspace.branches.map(b=><option key={b.id} value={b.id}>{b.name}{b.code ? ' (' + b.code + ')' : ''}</option>)}
       </select></label>
       {shift ? <div className="shift-chip"><strong>Shift open</strong><span>Opening float: {shift.openingFloat.toFixed(2)}</span></div> : <form className="open-shift-form" onSubmit={openShift}>
@@ -151,7 +151,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
         <div className="section-heading"><div><h3>Current sale</h3><p>{basket.length} line(s)</p></div></div>
         {basket.length===0?<div className="empty-state">Select products to add them to the sale.</div>:<div className="basket-list">{basket.map(line=>{
           const p=workspace.products.find(x=>x.id===line.productId)!;
-          return <div className="basket-line" key={line.productId}><strong>{p.name}</strong><div className="pos-two"><label>Qty<input type="number" min="0.001" step="0.001" max={stockFor(p.id)} value={line.quantity} onChange={e=>updateLine(p.id,{quantity:Number(e.target.value)})}/></label><label>Unit price<input type="number" min="0" step="0.01" value={line.unitPrice} onChange={e=>updateLine(p.id,{unitPrice:Number(e.target.value)})}/></label></div><button className="text-button" type="button" onClick={()=>setBasket(x=>x.filter(y=>y.productId!==p.id))}>Remove</button></div>;
+          return <div className="basket-line" key={line.productId}><strong>{p.name}</strong><div className="pos-two"><label>Qty<input type="number" min="0.001" step="0.001" max={stockFor(p.id)} value={line.quantity} onChange={e=>updateLine(p.id,{quantity:Number(e.target.value)})}/></label><label>Unit price<input value={line.unitPrice.toFixed(2)} readOnly /></label></div><button className="text-button" type="button" onClick={()=>setBasket(x=>x.filter(y=>y.productId!==p.id))}>Remove</button></div>;
         })}</div>}
         <div className="pos-total"><span>Total</span><strong>{cartTotal.toFixed(2)}</strong></div>
         <label>Payment method<select value={paymentMethod} onChange={e=>setPaymentMethod(e.target.value)}><option value="CASH">Cash</option><option value="MPESA">M-Pesa</option></select></label>
