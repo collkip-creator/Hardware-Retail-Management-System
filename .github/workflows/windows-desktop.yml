@@ -7,6 +7,7 @@ on:
       - desktop/local-first-migration
       - feature/offline-pos-foundation
       - feature/advanced-inventory-phase7
+      - feature/catalogue-stock-ui-parity
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
