@@ -195,9 +195,9 @@ export default function DesktopApp() {
       <div className="status-line"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Internet available' : 'Offline mode'} <span>· Local database ready</span></div>
       <h1>{status.setupRequired ? 'Set up this computer' : 'Sign in to your business'}</h1>
       <p className="muted">{status.setupRequired ? 'Create the first Business Owner account. Your account is stored securely on this computer.' : 'Sign in using your local staff username and password. Offline sign-in is supported after the account is registered on this computer.'}</p>
-      {status.setupRequired && !syncStatus.paired && <div className="pair-device-card">
+      {!syncStatus.paired && <div className="pair-device-card">
         <h2>Activate your business licence</h2>
-        <p>Enter the licence key issued by Collkip. The first computer activated becomes the primary Business Owner computer.</p>
+        <p>{status.setupRequired ? 'Enter the licence key issued by Collkip. The first computer activated becomes the primary Business Owner computer.' : 'This computer is not yet linked to a licensed business. Enter the licence key issued by Collkip to activate it as the primary Business Owner computer.'}</p>
         <form onSubmit={activateLicence}>
           <label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label>
           <button className="primary" type="submit" disabled={busy || !online || licenceKey.trim().length<12}>{busy?'Activating…':'Activate licence'}</button>
