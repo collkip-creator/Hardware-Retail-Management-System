@@ -97,5 +97,54 @@
       "Choose Generate pairing code"
     ],
     "expected": "A visible error explains that a pairing code could not be generated, and no pairing code is shown."
+  },
+  {
+    "name": "Require an authenticated Branch Manager for discounts",
+    "viewport": "desktop",
+    "covers": [
+      "six-digit manager approval PIN setup",
+      "salted PBKDF2 PIN storage",
+      "manager role enforcement",
+      "discount sale PIN verification",
+      "reason capture",
+      "approval audit trail",
+      "failed PIN rate limiting"
+    ],
+    "description": "Verifies discount approval is tied to a configured Branch Manager credential rather than a cashier-entered name.",
+    "steps": [
+      "Open Team and add a Branch Manager profile",
+      "Set a six-digit discount approval PIN for the manager",
+      "Open POS and add an item to the cart",
+      "Apply a discount and attempt checkout without manager approval",
+      "Select the configured Branch Manager and enter an incorrect PIN",
+      "Verify the sale is rejected",
+      "Enter the correct PIN and a reason for the discount",
+      "Complete the sale and review the discount audit entry"
+    ],
+    "expected": "Only a configured Branch Manager with a valid PIN can approve the discounted sale. The PIN is stored as a salted PBKDF2 hash, is never returned to the frontend, failed attempts are rate-limited, and the sale and audit log identify the approving manager and reason."
+  },
+  {
+    "name": "Reconcile cashier shift cash and M-Pesa balances",
+    "viewport": "desktop",
+    "covers": [
+      "opening cash float",
+      "cash and M-Pesa sales totals",
+      "cash and M-Pesa refund totals",
+      "closing cash count",
+      "closing M-Pesa statement count",
+      "cash variance",
+      "M-Pesa variance",
+      "shift close audit log"
+    ],
+    "description": "Verifies each shift calculates expected cash and M-Pesa from recorded payments and refunds and compares them with actual closing counts.",
+    "steps": [
+      "Open a cashier shift with an opening float of KSh 5000",
+      "Complete a sale paid KSh 3000 cash and KSh 2000 M-Pesa",
+      "Complete another sale paid KSh 1000 cash",
+      "Record and settle a KSh 500 cash refund during the shift",
+      "Close the shift with KSh 8500 cash and KSh 2000 M-Pesa counted",
+      "Review the reconciliation summary and audit record"
+    ],
+    "expected": "Expected cash is KSh 8500 (opening float plus cash sales less cash refunds), expected M-Pesa is KSh 2000, both variances are zero, and the closed shift retains its complete reconciliation summary."
   }
 ]
