@@ -299,8 +299,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     // Ensure every existing active branch has a receiving warehouse.
     let branch_ids = {
         let mut statement = connection.prepare("SELECT id FROM branches WHERE status='active'").map_err(|e| e.to_string())?;
-        statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        let rows = statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        let ids = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        ids
     };
     for branch_id in branch_ids {
         let count: i64 = connection.query_row(
