@@ -1238,6 +1238,13 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let actual_method=if cash_amount>0.0&&mpesa_amount>0.0{"SPLIT"}else if mpesa_amount>0.0{"MPESA"}else{"CASH"};
     if method!=actual_method{return Err("Payment method does not match the entered payment amounts.".into());}
     tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone,cash_amount,mpesa_amount) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone,cash_amount,mpesa_amount]).map_err(|e|e.to_string())?;
+    let business_id:String=tx.query_row("SELECT business_id FROM branches WHERE id=?1",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if cash_amount>0.0 {
+        tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'CASH',NULL,?4,'POS_SALE',?5,?6)",params![Uuid::new_v4().to_string(),business_id,cash_amount,format!("Cash received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;
+    }
+    if mpesa_amount>0.0 {
+        tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'MPESA',?4,?5,'POS_SALE',?6,?7)",params![Uuid::new_v4().to_string(),business_id,mpesa_amount,payment_reference.as_deref().unwrap_or(""),format!("M-Pesa received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;
+    }
     for line in &lines{
         let item_id=Uuid::new_v4().to_string();
         tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item_id,sale_id,line["productId"].as_str(),line["name"].as_str(),line["quantity"].as_f64(),line["unitPrice"].as_f64(),line["unitCost"].as_f64(),line["lineTotal"].as_f64()]).map_err(|e|e.to_string())?;
