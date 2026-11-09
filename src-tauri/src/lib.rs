@@ -927,7 +927,10 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
 fn create_pos_product(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,name:String,sku:String,unit:String,buying_price:f64,selling_price:f64)->Result<serde_json::Value,String>{
     let name=name.trim();let sku=sku.trim().to_uppercase();let unit=unit.trim();
     if name.len()<2||name.len()>160||sku.len()<2||sku.len()>60||unit.is_empty()||unit.len()>30{return Err("Enter a product name, SKU and stock unit.".into());}
-    if !buying_price.is_finite()||buying_price<0||!selling_price.is_finite()||selling_price<0{return Err("Enter valid non-negative prices.".into());}
+    if !buying_price.is_finite() || buying_price < 0.0 ||
+   !selling_price.is_finite() || selling_price < 0.0 {
+    return Err("Enter valid non-negative prices.".into());
+}
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can add products.".into());}
