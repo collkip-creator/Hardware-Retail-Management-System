@@ -345,6 +345,45 @@ export const handler = router({
       return json({ ok: true, updatedAt });
     },
   ],
+  'POST /api/desktop/sync/customers': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      const body = (ctx.body || {}) as Record<string, any>;
+      const incoming = Array.isArray(body.customers) ? body.customers : null;
+      if (!incoming || incoming.length > 5000) return error('A valid customer list of up to 5,000 records is required.', 400);
+      const targetTable = table(device.userId, 'desktop_sync_state');
+      const saved = await db.list(targetTable, { limit: 1 });
+      const current = saved.items[0];
+      if (!current?.snapshot) return error('The primary computer has not synchronised the business workspace yet.', 409);
+      const snapshot = JSON.parse(JSON.stringify(current.snapshot));
+      const records = Array.isArray(snapshot.customers) ? snapshot.customers : [];
+      const byId = new Map(records.map((item: any) => [item.id, item]));
+      for (const item of incoming) {
+        if (!item || typeof item.id !== 'string' || typeof item.name !== 'string' || typeof item.phone !== 'string' || item.name.trim().length < 2 || !item.phone.trim()) {
+          return error('Every customer needs an ID, name and phone number.', 400);
+        }
+        const existing: any = byId.get(item.id);
+        const incomingTime = Date.parse(item.updatedAt || item.createdAt || '') || 0;
+        const existingTime = Date.parse(existing?.updatedAt || existing?.createdAt || '') || 0;
+        if (!existing || incomingTime >= existingTime) byId.set(item.id, {
+          id: item.id, businessId: snapshot.business?.id, name: item.name.slice(0,160), phone: item.phone.slice(0,40),
+          email: typeof item.email === 'string' ? item.email.slice(0,160) : null,
+          address: typeof item.address === 'string' ? item.address.slice(0,240) : null,
+          kraPin: typeof item.kraPin === 'string' ? item.kraPin.slice(0,30) : null,
+          notes: typeof item.notes === 'string' ? item.notes.slice(0,1000) : null,
+          active: item.active !== false, createdAt: item.createdAt || new Date().toISOString(),
+          updatedAt: item.updatedAt || new Date().toISOString(),
+        });
+      }
+      snapshot.customers = Array.from(byId.values());
+      const updatedAt = new Date().toISOString();
+      const record = { ...current, snapshot, updatedAt, revision: Number(current.revision || 0) + 1 };
+      const [ok] = await db.update(targetTable, [{ id: current.id, record }]);
+      if (!ok) return error('Customer records could not be saved to the cloud. Please retry.', 500);
+      return json({ ok: true, updatedAt, count: snapshot.customers.length });
+    },
+  ],
   'POST /api/desktop/sync/push': [
     async ctx => {
       const device = await authenticatedDesktop(ctx);
@@ -364,6 +403,16 @@ export const handler = router({
       const targetTable = table(device.userId, 'desktop_sync_state');
       const existing = await db.list(targetTable, { limit: 1 });
       const latestSnapshot = existing.items[0]?.snapshot;
+      if (latestSnapshot && Array.isArray(latestSnapshot.customers)) {
+        const merged = new Map((Array.isArray(snapshot.customers) ? snapshot.customers : []).map((item: any) => [item.id, item]));
+        for (const latest of latestSnapshot.customers) {
+          const incoming: any = merged.get(latest.id);
+          const latestTime = Date.parse(latest.updatedAt || latest.createdAt || '') || 0;
+          const incomingTime = Date.parse(incoming?.updatedAt || incoming?.createdAt || '') || 0;
+          if (!incoming || latestTime > incomingTime) merged.set(latest.id, latest);
+        }
+        snapshot.customers = Array.from(merged.values());
+      }
       if (latestSnapshot && Array.isArray(latestSnapshot.staff)) {
         for (const staff of snapshot.staff) {
           const latest = latestSnapshot.staff.find((item: any) => item.profile?.id === staff.profile?.id);
