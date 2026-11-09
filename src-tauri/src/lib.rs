@@ -491,6 +491,39 @@ fn write_sync_value(connection: &Connection, key: &str, value: &str) -> Result<(
 }
 
 #[tauri::command]
+async fn activate_desktop_licence(
+    database: tauri::State<'_, LocalDatabase>,
+    licence_key: String,
+    device_name: String,
+) -> Result<serde_json::Value, String> {
+    let (device_id, already_activated) = {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        let id: String = connection.query_row("SELECT value FROM app_meta WHERE key='device_id'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        (id, read_sync_value(&connection, "device_token")?.is_some())
+    };
+    if already_activated { return Err("This computer is already activated or paired.".into()); }
+    let key = licence_key.trim().to_uppercase();
+    if key.len() < 12 || key.len() > 100 || !key.starts_with("HRMS-") { return Err("Enter a valid licence key.".into()); }
+    let client = reqwest::Client::new();
+    let response = client.post(format!("{DESKTOP_API_BASE}/desktop/licences/activate"))
+        .json(&serde_json::json!({"licenceKey":key,"deviceId":device_id,"deviceName":device_name.trim()}))
+        .send().await.map_err(|e| format!("Could not reach the licence activation service: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.map_err(|e| format!("The licence service returned an unreadable response: {e}"))?;
+    if !status.is_success() {
+        return Err(body.get("error").and_then(|v|v.as_str()).unwrap_or("Licence activation failed.").to_string());
+    }
+    let token = body.get("deviceToken").and_then(|v|v.as_str()).ok_or_else(|| "The activation service did not issue a device credential.".to_string())?;
+    let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    write_sync_value(&connection, "device_token", token)?;
+    write_sync_value(&connection, "owner_device", "true")?;
+    write_sync_value(&connection, "licence_id", body.get("id").and_then(|v|v.as_str()).unwrap_or(""))?;
+    write_sync_value(&connection, "licence_expires_at", body.get("expiresAt").and_then(|v|v.as_str()).unwrap_or(""))?;
+    write_sync_value(&connection, "business_id", body.get("businessId").and_then(|v|v.as_str()).unwrap_or(""))?;
+    Ok(body)
+}
+
+#[tauri::command]
 fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Result<DeviceSyncStatus, String> {
     let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
     let token = read_sync_value(&connection, "device_token")?;
@@ -733,6 +766,7 @@ pub fn run() {
             list_devices,
             change_staff_password,
             get_device_sync_status,
+            activate_desktop_licence,
             pair_desktop_device,
             generate_desktop_pairing_code,
             sync_desktop_workspace
