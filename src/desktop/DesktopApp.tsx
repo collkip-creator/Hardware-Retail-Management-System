@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import PosWorkspace from './PosWorkspace';
+import CatalogueWorkspace from './CatalogueWorkspace';
 import InventoryWorkspace from './InventoryWorkspace';
 
 type LocalStatus = { setupRequired: boolean; deviceId: string; staffCount: number; schemaVersion: number };
@@ -9,7 +10,7 @@ type BusinessProfile = { id: string; name: string; currency: string; timezone: s
 type Branch = { id: string; name: string; code: string | null; status: string };
 type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
 type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
-type Tab = 'overview' | 'pos' | 'inventory' | 'business' | 'branches' | 'staff' | 'devices';
+type Tab = 'overview' | 'catalogue' | 'pos' | 'inventory' | 'business' | 'branches' | 'staff' | 'devices';
 type SyncStatus = { paired: boolean; ownerDevice: boolean; licenceActive: boolean; licenceStatus: string; licenceMessage: string | null; lastSyncAt: string | null };
 type SyncResult = { ownerDevice: boolean; updatedAt: string; branches: number; staff: number };
 type PairingCodeResult = { code: string; expiresAt: string; ownerDevice: boolean };
@@ -230,11 +231,11 @@ export default function DesktopApp() {
 
   if (session.mustChangePassword) return <main className="screen"><section className="panel narrow"><Brand/><h1>Change your temporary password</h1><p className="muted">Your owner provided a temporary password. Set a new password before continuing.</p><form onSubmit={async (event)=>{event.preventDefault();setError('');if(newPassword!==confirmPassword){setError('The new passwords do not match.');return;}setBusy(true);try{await invoke('change_staff_password',{staffId:session.staffId,currentPassword,newPassword});try{const sync=await invoke<SyncResult>('sync_desktop_workspace');const syncState=await invoke<SyncStatus>('get_device_sync_status');setSyncStatus({...syncState,lastSyncAt:sync.updatedAt});setNotice('Your new password has been synchronised securely.');}catch{setNotice('Your password has been changed on this computer. Cloud synchronisation will retry when internet is available.');}setSession({...session,mustChangePassword:false});setCurrentPassword('');setNewPassword('');setConfirmPassword('');}catch(e){setError(String(e));}finally{setBusy(false);}}}><label>Temporary password<input type="password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} required/></label><label>New password<input type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} minLength={12} maxLength={128} required/><small>Use at least 12 characters.</small></label><label>Confirm new password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required/></label>{error&&<p className="error">{error}</p>}<button className="primary" disabled={busy}>{busy?'Saving…':'Save new password'}</button></form><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
 
-  if (session.role !== 'Business Owner') return <main className="main-area"><PosWorkspace session={session} onSignOut={()=>setSession(null)} />{['Manager','Storekeeper','Supervisor'].includes(session.role)&&<InventoryWorkspace session={session}/>}</main>;
+  if (session.role !== 'Business Owner') return <main className="main-area"><CatalogueWorkspace session={session}/><PosWorkspace session={session} onSignOut={()=>setSession(null)} />{['Manager','Storekeeper','Supervisor'].includes(session.role)&&<InventoryWorkspace session={session}/>}</main>;
 
   const updateBusiness = (key: keyof BusinessProfile, value: string) => setBusiness(current => current ? { ...current, [key]: value } : current);
   const nav: { id: Tab; label: string; icon: string }[] = [
-    {id:'overview',label:'Overview',icon:'⌂'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
+    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
   ];
 
   return <main className="app-shell">
@@ -251,6 +252,7 @@ export default function DesktopApp() {
         <div className="section-heading"><div><h2>Getting started</h2><p>Complete these setup steps before daily operations.</p></div></div>
         <div className="setup-list"><SetupStep done={business.name!==`${session.displayName}'s Business`} title="Complete business profile" detail="Add your trading name and contact information" onClick={()=>setTab('business')}/><SetupStep done={branches.length>0} title="Register your first branch" detail="Create the main store or first outlet" onClick={()=>setTab('branches')}/><SetupStep done={staff.length>1} title="Add your team" detail="Create staff logins and assign their roles" onClick={()=>setTab('staff')}/></div>
       </>}
+      {tab==='catalogue'&&<CatalogueWorkspace session={session} />}
       {tab==='pos'&&<PosWorkspace session={session} onSignOut={()=>setSession(null)} />}
       {tab==='inventory'&&<InventoryWorkspace session={session} />}
       {tab==='business'&&business&&<div className="content-card"><div className="section-heading"><div><h2>Business details</h2><p>These details identify your business in the desktop workspace.</p></div></div>
