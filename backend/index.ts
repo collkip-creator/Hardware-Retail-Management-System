@@ -516,7 +516,7 @@ export const handler = router({
       if (!manager) return error('Team member not found.', 404);
       if (manager.role !== 'Branch Manager' || manager.status === 'inactive') return error('Only an active Branch Manager can be configured to approve discounts.', 403);
       const pin = textField((ctx.body || {}).pin, 12);
-      if (!/^\\d{6}$/.test(pin)) return error('Set a six-digit discount approval PIN.', 400);
+      if (!/^\d{6}$/.test(pin)) return error('Set a six-digit discount approval PIN.', 400);
       const salt = randomHex(16);
       const hash = await deriveDiscountPinHash(pin, salt);
       const updated = { ...manager, discountPinSalt: salt, discountPinHash: hash, discountPinUpdatedAt: new Date().toISOString() };
@@ -777,7 +777,7 @@ export const handler = router({
         const managerId = textField(approval.managerId, 120);
         const pin = textField(approval.pin, 12);
         const reason = textField(approval.reason, 300);
-        if (!managerId || !/^\\d{6}$/.test(pin) || !reason) return error('Discounts require a configured Branch Manager, their six-digit approval PIN and a reason.', 400);
+        if (!managerId || !/^\d{6}$/.test(pin) || !reason) return error('Discounts require a configured Branch Manager, their six-digit approval PIN and a reason.', 400);
         approvedManager = await verifyDiscountManagerPin(userId, managerId, pin);
         if (!approvedManager) return error('Manager approval failed. Check the manager PIN or contact the Business Owner if the manager is locked after repeated failed attempts.', 403);
       }
