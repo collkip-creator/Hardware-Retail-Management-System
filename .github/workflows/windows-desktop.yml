@@ -6,6 +6,7 @@ on:
     branches:
       - desktop/local-first-migration
       - feature/offline-pos-foundation
+      - feature/advanced-inventory-phase7
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
