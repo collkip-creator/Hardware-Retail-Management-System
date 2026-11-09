@@ -231,7 +231,28 @@ export default function DesktopApp() {
 
   if (session.mustChangePassword) return <main className="screen"><section className="panel narrow"><Brand/><h1>Change your temporary password</h1><p className="muted">Your owner provided a temporary password. Set a new password before continuing.</p><form onSubmit={async (event)=>{event.preventDefault();setError('');if(newPassword!==confirmPassword){setError('The new passwords do not match.');return;}setBusy(true);try{await invoke('change_staff_password',{staffId:session.staffId,currentPassword,newPassword});try{const sync=await invoke<SyncResult>('sync_desktop_workspace');const syncState=await invoke<SyncStatus>('get_device_sync_status');setSyncStatus({...syncState,lastSyncAt:sync.updatedAt});setNotice('Your new password has been synchronised securely.');}catch{setNotice('Your password has been changed on this computer. Cloud synchronisation will retry when internet is available.');}setSession({...session,mustChangePassword:false});setCurrentPassword('');setNewPassword('');setConfirmPassword('');}catch(e){setError(String(e));}finally{setBusy(false);}}}><label>Temporary password<input type="password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} required/></label><label>New password<input type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} minLength={12} maxLength={128} required/><small>Use at least 12 characters.</small></label><label>Confirm new password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required/></label>{error&&<p className="error">{error}</p>}<button className="primary" disabled={busy}>{busy?'Saving…':'Save new password'}</button></form><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
 
-  if (session.role !== 'Business Owner') return <main className="main-area"><CatalogueWorkspace session={session}/><PosWorkspace session={session} onSignOut={()=>setSession(null)} />{['Manager','Storekeeper','Supervisor'].includes(session.role)&&<InventoryWorkspace session={session}/>}</main>;
+  if (session.role !== 'Business Owner') {
+    const staffTabs: { id: Tab; label: string }[] = [
+      { id: 'catalogue', label: 'Products & stock' },
+      { id: 'pos', label: 'Point of sale' },
+      ...(['Manager', 'Storekeeper', 'Supervisor'].includes(session.role) ? [{ id: 'inventory' as Tab, label: 'Inventory' }] : []),
+    ];
+    const activeStaffTab = staffTabs.some(item => item.id === tab) ? tab : 'catalogue';
+    return <main className="app-shell staff-shell">
+      <aside className="sidebar">
+        <Brand compact />
+        <div className="side-caption">STAFF WORKSPACE</div>
+        {staffTabs.map(item => <button key={item.id} className={activeStaffTab === item.id ? 'nav-item active' : 'nav-item'} onClick={() => setTab(item.id)}>{item.label}</button>)}
+        <div className="side-bottom"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Internet available' : 'Offline mode'}<small>{session.displayName} · {session.role}</small><button className="secondary signout" onClick={() => setSession(null)}>Sign out</button></div>
+      </aside>
+      <section className="main-area">
+        <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span></div></header>
+        {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
+        {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
+        {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} />}
+      </section>
+    </main>;
+  }
 
   const updateBusiness = (key: keyof BusinessProfile, value: string) => setBusiness(current => current ? { ...current, [key]: value } : current);
   const nav: { id: Tab; label: string; icon: string }[] = [
