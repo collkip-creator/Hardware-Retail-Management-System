@@ -26,6 +26,11 @@ export default function CustomersWorkspace({ session }: { session: Session }) {
     const data = await invoke<Workspace>('get_customers_workspace', { actorStaffId: session.staffId });
     setWorkspace({ ...data, customers: Array.isArray(data.customers) ? data.customers : [] });
   }
+  async function syncIfAvailable() {
+    if (!navigator.onLine) return;
+    const status = await invoke<{ paired: boolean }>('get_device_sync_status');
+    if (status.paired) await invoke('sync_desktop_workspace');
+  }
   useEffect(() => { load().catch(e => setError(String(e).replace(/^Error: /, ''))); }, [session.staffId]);
 
   const customers = workspace?.customers || [];
@@ -46,7 +51,7 @@ export default function CustomersWorkspace({ session }: { session: Session }) {
     e.preventDefault(); setBusy(true); setError(''); setNotice('');
     try {
       await invoke('save_customer', { actorStaffId: session.staffId, id: editingId, ...form });
-      await load(); setNotice(editingId ? 'Customer details updated.' : 'Customer added to this business.');
+      await load(); try { await syncIfAvailable(); } catch { /* The local save remains valid; sync can be retried later. */ } setNotice(editingId ? 'Customer details updated.' : 'Customer added to this business.');
       clear();
     } catch (e) { setError(String(e).replace(/^Error: /, '')); }
     finally { setBusy(false); }
@@ -55,7 +60,7 @@ export default function CustomersWorkspace({ session }: { session: Session }) {
     setBusy(true); setError(''); setNotice('');
     try {
       await invoke('set_customer_status', { actorStaffId: session.staffId, customerId: customer.id, active: !customer.active });
-      await load(); setNotice(customer.active ? 'Customer deactivated. Their transaction history has been retained.' : 'Customer reactivated.');
+      await load(); try { await syncIfAvailable(); } catch { /* The local status change remains valid; sync can be retried later. */ } setNotice(customer.active ? 'Customer deactivated. Their transaction history has been retained.' : 'Customer reactivated.');
     } catch (e) { setError(String(e).replace(/^Error: /, '')); }
     finally { setBusy(false); }
   }
