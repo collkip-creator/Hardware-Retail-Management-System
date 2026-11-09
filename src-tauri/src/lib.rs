@@ -1093,6 +1093,8 @@ fn get_inventory_workspace(database: tauri::State<'_, LocalDatabase>, actor_staf
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let role=inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper","Supervisor"])?;
     let scope:Option<String>=if role=="Business Owner"{None}else{c.query_row("SELECT branch_id FROM staff_profiles WHERE id=?1",[&actor_staff_id],|r|r.get(0)).map_err(|e|e.to_string())?};
+    let mut transfer_branches_stmt=c.prepare("SELECT id,name,code FROM branches WHERE status=?1 ORDER BY name").map_err(|e|e.to_string())?;
+    let transfer_branches=transfer_branches_stmt.query_map(["active"],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut branches_stmt=c.prepare("SELECT id,name,code FROM branches WHERE status='active' AND (?1 IS NULL OR id=?1) ORDER BY name").map_err(|e|e.to_string())?;
     let branches=branches_stmt.query_map([scope.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut products_stmt=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
@@ -1110,7 +1112,7 @@ fn get_inventory_workspace(database: tauri::State<'_, LocalDatabase>, actor_staf
     let transfers=transfers_stmt.query_map([scope.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"number":r.get::<_,String>(1)?,"fromBranchId":r.get::<_,String>(2)?,"fromBranch":r.get::<_,String>(3)?,"toBranchId":r.get::<_,String>(4)?,"toBranch":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,"createdAt":r.get::<_,String>(7)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut takes_stmt=c.prepare("SELECT id,branch_id,status,created_at,notes FROM stocktake_sessions WHERE (?1 IS NULL OR branch_id=?1) ORDER BY created_at DESC LIMIT 30").map_err(|e|e.to_string())?;
     let stocktakes=takes_stmt.query_map([scope.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"createdAt":r.get::<_,String>(3)?,"notes":r.get::<_,Option<String>>(4)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"role":role,"branches":branches,"products":products,"stock":stock,"reorderLevels":levels,"movements":movements,"transfers":transfers,"stocktakes":stocktakes}))
+    Ok(serde_json::json!({"role":role,"branches":branches,"products":products,"stock":stock,"reorderLevels":levels,"movements":movements,"transfers":transfers,"stocktakes":stocktakes,"transferBranches":transfer_branches}))
 }
 
 #[tauri::command]
