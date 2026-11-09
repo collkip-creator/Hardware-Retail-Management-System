@@ -482,6 +482,14 @@ struct PairingResult { device_id: String, owner_device: bool }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PairingCodeResult {
+    code: String,
+    expires_at: String,
+    owner_device: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SyncResult { owner_device: bool, updated_at: String, branches: usize, staff: usize }
 
 fn read_sync_value(connection: &Connection, key: &str) -> Result<Option<String>, String> {
