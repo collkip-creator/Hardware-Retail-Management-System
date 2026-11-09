@@ -573,6 +573,53 @@ async fn activate_desktop_licence(
 }
 
 #[tauri::command]
+async fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Result<DeviceSyncStatus, String> {
+    let (token, owner, licence_id, last, cached_status) = {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        (
+            read_sync_value(&connection, "device_token")?,
+            read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true",
+            read_sync_value(&connection, "licence_id")?.unwrap_or_default(),
+            read_sync_value(&connection, "last_sync_at")?,
+            read_sync_value(&connection, "licence_status")?.unwrap_or_default(),
+        )
+    };
+    let mut licence_active = !licence_id.is_empty() && (cached_status.is_empty() || cached_status == "active");
+    let mut licence_status = if !cached_status.is_empty() {
+        cached_status.clone()
+    } else if licence_active {
+        "active".to_string()
+    } else {
+        "none".to_string()
+    };
+    let mut licence_message: Option<String> = None;
+    if let Some(token_value) = token.as_deref() {
+        if let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(12)).build() {
+            if let Ok(response) = client.get(format!("{DESKTOP_API_BASE}/desktop/licences/status")).bearer_auth(token_value).send().await {
+                if response.status().is_success() {
+                    if let Ok(body) = response.json::<serde_json::Value>().await {
+                        licence_active = body["licenceActive"].as_bool().unwrap_or(false);
+                        licence_status = body["status"].as_str().unwrap_or("none").to_string();
+                        licence_message = body["message"].as_str().map(str::to_string);
+                        if let Ok(connection) = database.0.lock() {
+                            let _ = write_sync_value(&connection, "licence_status", &licence_status);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(DeviceSyncStatus {
+        paired: token.is_some(),
+        owner_device: owner,
+        licence_active,
+        licence_status,
+        licence_message,
+        last_sync_at: last,
+    })
+}
+
+#[tauri::command]
 async fn generate_desktop_pairing_code(
     database: tauri::State<'_, LocalDatabase>,
     actor_staff_id: String,
