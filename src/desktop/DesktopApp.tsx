@@ -258,7 +258,7 @@ export default function DesktopApp() {
 
   const updateBusiness = (key: keyof BusinessProfile, value: string) => setBusiness(current => current ? { ...current, [key]: value } : current);
   const nav: { id: Tab; label: string; icon: string }[] = [
-    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
+    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'procurement',label:'Suppliers & purchasing',icon:'▧'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
   ];
 
   return <main className="app-shell">
