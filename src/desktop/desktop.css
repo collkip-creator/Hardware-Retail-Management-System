@@ -215,3 +215,20 @@ td { color:#3d4d42; }
 .receipt-panel div,.receipt-panel span { display:block; }
 .receipt-panel span { margin-top:4px; color:#62786a; font-size:11px; }
 @media(max-width:850px) { .pos-admin-grid,.pos-main-grid { grid-template-columns:1fr; } .pos-toolbar,.pos-topline { align-items:stretch; flex-direction:column; } .open-shift-form { align-items:stretch; flex-direction:column; } }
+
+
+/* Phase 7 advanced inventory */
+.inventory-workspace { width:100%; max-width:1200px; margin:24px auto 0; }
+.inventory-intro { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:18px 0; }
+.inventory-intro h2 { margin:5px 0; font-size:24px; }
+.inventory-intro p { margin:4px 0; }
+.inventory-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:16px 0; }
+.inventory-filter { max-width:320px; margin:12px 0 16px; }
+.inventory-forms { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:15px; margin-bottom:16px; }
+.inventory-forms .content-card { margin:0; display:grid; align-content:start; gap:12px; }
+.inventory-forms h3,.inventory-workspace h3 { margin:0 0 4px; color:#214d36; font-size:15px; }
+.stocktake-editor { border-top:1px solid #e7eee8; margin-top:18px; padding-top:18px; }
+.stocktake-editor .form-actions { display:flex; gap:10px; margin-top:14px; }
+.count-input { min-width:110px; max-width:150px; padding:8px; }
+.inventory-workspace td small { display:block; margin-top:3px; }
+@media(max-width:850px) { .inventory-forms { grid-template-columns:1fr; } .inventory-metrics { grid-template-columns:1fr; } .inventory-intro { align-items:flex-start; flex-direction:column; } }
