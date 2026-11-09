@@ -1454,7 +1454,7 @@ fn receive_purchase_goods(database:tauri::State<'_,LocalDatabase>,actor_staff_id
     ensure_branch_access(&tx,&actor_staff_id,&branch)?;ensure_branch_not_in_stocktake(&tx,&branch)?;
     let mut lines:Vec<serde_json::Value>=serde_json::from_str(&items_json).map_err(|e|e.to_string())?;
     let mut seen=std::collections::HashSet::new();let mut received_total=0.0;
-    for requested in items{
+    for requested in &items{
         let pid=requested["productId"].as_str().unwrap_or_default().to_string();let qty=requested["quantity"].as_f64().unwrap_or(0.0);
         if pid.is_empty()||!seen.insert(pid.clone())||!qty.is_finite()||qty<=0.0{return Err("Each receipt line must identify one product and a positive quantity.".into());}
         let line=lines.iter_mut().find(|x|x["productId"].as_str()==Some(pid.as_str())).ok_or_else(||"A receipt product is not part of this purchase order.".to_string())?;
