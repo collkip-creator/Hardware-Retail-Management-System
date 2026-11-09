@@ -129,7 +129,9 @@ function App() {
   const [editingCustomer, setEditingCustomer] = useState<string | null>(null);
   const [purchaseForm, setPurchaseForm] = useState({ supplierId: '', branchId: '', warehouseId: '', invoiceNumber: '', expectedDate: '', notes: '' });
   const [purchaseLines, setPurchaseLines] = useState<any[]>([{ productId: '', quantity: '1', unitCost: '0' }]);
-  const [purchasePayment, setPurchasePayment] = useState<Record<string, { amount: string; reference: string }>>({});
+  const [purchasePayment, setPurchasePayment] = useState<Record<string, { amount: string; reference: string; paymentMethod: string }>>({});
+  const [receiveQuantities, setReceiveQuantities] = useState<Record<string, string>>({});
+  const [refundSettlement, setRefundSettlement] = useState<Record<string, { paymentMethod: string; reference: string }>>({});
   const [customerSearch, setCustomerSearch] = useState('');
   const [discountApproval, setDiscountApproval] = useState({ managerName: '', reason: '' });
   const [returnForm, setReturnForm] = useState({ saleId: '', productId: '', quantity: '1', condition: 'RESTOCK', refundMethod: 'CASH', reason: '' });
@@ -539,16 +541,35 @@ function App() {
       setPurchaseLines([{ productId: '', quantity: '1', unitCost: '0' }]); await loadWorkspace();
     } catch (e:any) { setError(e?.response?.data?.error || e.message || 'Could not create purchase order.'); }
   }
-  async function receivePurchase(purchaseId: string) {
+  async function receivePurchase(purchaseId: string, productId: string, remaining: number) {
+    const quantity = Number(receiveQuantities[purchaseId + ':' + productId] || remaining);
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > remaining) { setError('Enter a positive quantity no greater than the outstanding amount.'); return; }
     setError(''); setNotice('');
-    try { const result = await api.post('/api/purchases/' + purchaseId + '/receive', {}); setNotice('Goods received: ' + result.data.receivedLines + ' line(s). Stock has been updated.'); await loadWorkspace(); }
-    catch (e:any) { setError(e?.response?.data?.error || e.message || 'Could not receive this purchase.'); }
+    try {
+      const result = await api.post('/api/purchases/' + purchaseId + '/receive', { items: [{ productId, quantity }] });
+      setNotice('Goods received: ' + result.data.receivedQuantity + ' unit(s). Purchase order status: ' + result.data.status + '.');
+      setReceiveQuantities({ ...receiveQuantities, [purchaseId + ':' + productId]: '' });
+      await loadWorkspace();
+    } catch (e:any) { setError(e?.response?.data?.error || e.message || 'Could not receive this purchase.'); }
   }
   async function paySupplier(purchaseId: string) {
-    const payment = purchasePayment[purchaseId] || { amount: '', reference: '' };
+    const payment = purchasePayment[purchaseId] || { amount: '', reference: '', paymentMethod: 'BANK' };
     setError(''); setNotice('');
-    try { await api.post('/api/purchases/' + purchaseId + '/payments', { amount: Number(payment.amount), reference: payment.reference }); setPurchasePayment({ ...purchasePayment, [purchaseId]: { amount: '', reference: '' } }); setNotice('Supplier payment recorded.'); await loadWorkspace(); }
-    catch (e:any) { setError(e?.response?.data?.error || e.message || 'Could not record supplier payment.'); }
+    try {
+      await api.post('/api/purchases/' + purchaseId + '/payments', { amount: Number(payment.amount), reference: payment.reference, paymentMethod: payment.paymentMethod });
+      setPurchasePayment({ ...purchasePayment, [purchaseId]: { amount: '', reference: '', paymentMethod: 'BANK' } });
+      setNotice('Supplier payment recorded and posted to the corresponding cash, M-Pesa or bank ledger.');
+      await loadWorkspace();
+    } catch (e:any) { setError(e?.response?.data?.error || e.message || 'Could not record supplier payment.'); }
+  }
+  async function settleRefund(returnId: string) {
+    const settlement = refundSettlement[returnId] || { paymentMethod: 'CASH', reference: '' };
+    setError(''); setNotice('');
+    try {
+      await api.post('/api/returns/' + returnId + '/refund', settlement);
+      setNotice('Refund settled and posted to the selected cash/M-Pesa ledger.');
+      await loadWorkspace();
+    } catch (e:any) { setError(e?.response?.data?.error || e.message || 'Could not settle this refund.'); }
   }
 
   async function processReturn(e: React.FormEvent) {
@@ -1579,7 +1600,7 @@ function App() {
                   {(() => { const selectedSale=sales.find(s=>s.id===returnForm.saleId); const eligible=(selectedSale?.items||[]).filter((item:any)=>Number(item.quantity)>(returns.filter(r=>r.saleId===selectedSale.id && r.productId===item.productId).reduce((sum:number,r:any)=>sum+Number(r.quantity),0))); return <><label className="field"><span>Item being returned *</span><select required value={returnForm.productId} onChange={e=>setReturnForm({...returnForm,productId:e.target.value})}><option value="">Select item</option>{eligible.map((item:any)=><option key={item.productId} value={item.productId}>{item.name} · Sold {item.quantity}</option>)}</select></label><div className="form-grid"><label className="field"><span>Quantity returned *</span><input type="number" min="0.001" step="any" value={returnForm.quantity} onChange={e=>setReturnForm({...returnForm,quantity:e.target.value})}/></label><label className="field"><span>Item condition *</span><select value={returnForm.condition} onChange={e=>setReturnForm({...returnForm,condition:e.target.value})}><option value="RESTOCK">Resalable — return to stock</option><option value="DAMAGED">Damaged — do not restock</option></select></label><label className="field"><span>Refund method *</span><select value={returnForm.refundMethod} onChange={e=>setReturnForm({...returnForm,refundMethod:e.target.value})}><option value="CASH">Cash refund</option><option value="MPESA">M-Pesa refund</option></select></label><label className="field"><span>Reason for return *</span><input required value={returnForm.reason} onChange={e=>setReturnForm({...returnForm,reason:e.target.value})}/></label></div></>; })()}
                   <button className="primary-button" type="submit" disabled={!returnForm.saleId || !returnForm.productId}>Record return & refund due</button>
                 </form>
-                <div className="ledger-heading"><strong>Recent returns</strong><span>Return value recorded</span></div>{returns.slice(-8).reverse().map(r=><div className="ledger-row" key={r.id}><span>{r.returnNumber} · {r.productName} · {r.condition} · {new Date(r.createdAt).toLocaleString()}</span><strong>KSh {Number(r.refundAmount).toLocaleString('en-KE')}</strong><small>{r.refundMethod}</small></div>)}
+                <div className="ledger-heading"><strong>Recent returns</strong><span>Return value and settlement status</span></div>{returns.slice(-8).reverse().map(r=><div className="ledger-row" key={r.id}><span>{r.returnNumber} · {r.productName} · {r.condition} · {new Date(r.createdAt).toLocaleString()}</span><strong>KSh {Number(r.refundAmount).toLocaleString('en-KE')}</strong><small>{r.status === 'REFUNDED' ? 'Refund paid · ' + (r.refundMethod || '') + (r.refundReference ? ' · ' + r.refundReference : '') : 'Refund due'}</small>{r.status === 'REFUND_DUE' && <div className="form-grid"><label className="field"><span>Refund method</span><select value={refundSettlement[r.id]?.paymentMethod || r.refundMethod || 'CASH'} onChange={e=>setRefundSettlement({...refundSettlement,[r.id]:{paymentMethod:e.target.value,reference:refundSettlement[r.id]?.reference || ''}})}><option value="CASH">Cash</option><option value="MPESA">M-Pesa</option></select></label><label className="field"><span>M-Pesa refund code / reference</span><input value={refundSettlement[r.id]?.reference || ''} onChange={e=>setRefundSettlement({...refundSettlement,[r.id]:{paymentMethod:refundSettlement[r.id]?.paymentMethod || r.refundMethod || 'CASH',reference:e.target.value}})} /></label><button className="primary-button" onClick={()=>settleRefund(r.id)}>Confirm refund paid</button></div>}</div>)}
               </section>
             </div>
           )}
@@ -1637,12 +1658,13 @@ function App() {
                   const remaining = (p.items || []).reduce((sum: number, x: any) => sum + Math.max(0, Number(x.quantity) - Number(x.receivedQuantity || 0)), 0);
                   return <article className="purchase-card" key={p.id}>
                     <div className="panel-heading"><div><h3>{p.orderNumber} · {p.supplierName}</h3><p>{branches.find(b => b.id === p.branchId)?.name || 'Branch'} · {p.invoiceNumber || 'No supplier invoice reference'} · {new Date(p.createdAt).toLocaleDateString()}</p></div><span className="count-pill">{p.status}</span></div>
-                    {(p.items || []).map((x: any) => <div className="ledger-row" key={x.productId}><span>{x.productName} · Ordered {x.quantity} · Received {x.receivedQuantity || 0}</span><strong>KSh {Number(x.lineTotal).toLocaleString('en-KE')}</strong></div>)}
+                    {(p.items || []).map((x: any) => { const remainingLine = Math.max(0, Number(x.quantity) - Number(x.receivedQuantity || 0)); return <div className="ledger-row" key={x.productId}><span>{x.productName} · Ordered {x.quantity} · Received {x.receivedQuantity || 0} · Outstanding {remainingLine}</span><strong>KSh {Number(x.lineTotal).toLocaleString('en-KE')}</strong>{remainingLine > 0 && <><input aria-label={'Quantity to receive for ' + x.productName} type="number" min="0.001" max={remainingLine} step="any" placeholder={'Up to ' + remainingLine} value={receiveQuantities[p.id + ':' + x.productId] || ''} onChange={e => setReceiveQuantities({ ...receiveQuantities, [p.id + ':' + x.productId]: e.target.value })} /><button className="secondary-button" onClick={() => receivePurchase(p.id, x.productId, remainingLine)}>Receive quantity</button></>}</div>; })}
                     <div className="ledger-row"><span>Order total · Paid KSh {Number(p.paidAmount || 0).toLocaleString('en-KE')} · Outstanding</span><strong>KSh {outstanding.toLocaleString('en-KE')}</strong></div>
-                    {remaining > 0 && <button className="secondary-button" onClick={() => receivePurchase(p.id)}>Receive all outstanding goods ({remaining} units)</button>}
+                    {remaining > 0 && <small className="helper">Enter the quantity received beside each product. You can receive the balance in later deliveries.</small>}
                     {outstanding > 0 && <div className="form-grid purchase-payment">
                       <label className="field"><span>Payment amount (KSh)</span><input type="number" min="0.01" max={outstanding} step="0.01" value={purchasePayment[p.id]?.amount || ''} onChange={e => setPurchasePayment({ ...purchasePayment, [p.id]: { amount: e.target.value, reference: purchasePayment[p.id]?.reference || '' } })} /></label>
-                      <label className="field"><span>Payment reference</span><input value={purchasePayment[p.id]?.reference || ''} onChange={e => setPurchasePayment({ ...purchasePayment, [p.id]: { amount: purchasePayment[p.id]?.amount || '', reference: e.target.value } })} /></label>
+                      <label className="field"><span>Payment method</span><select value={purchasePayment[p.id]?.paymentMethod || 'BANK'} onChange={e => setPurchasePayment({ ...purchasePayment, [p.id]: { amount: purchasePayment[p.id]?.amount || '', reference: purchasePayment[p.id]?.reference || '', paymentMethod: e.target.value } })}><option value="CASH">Cash</option><option value="MPESA">M-Pesa</option><option value="BANK">Bank</option></select></label>
+                      <label className="field"><span>Payment reference {purchasePayment[p.id]?.paymentMethod === 'MPESA' ? '*' : '(optional)'}</span><input value={purchasePayment[p.id]?.reference || ''} onChange={e => setPurchasePayment({ ...purchasePayment, [p.id]: { amount: purchasePayment[p.id]?.amount || '', reference: e.target.value, paymentMethod: purchasePayment[p.id]?.paymentMethod || 'BANK' } })} /></label>
                       <button className="primary-button" onClick={() => paySupplier(p.id)}>Record supplier payment</button>
                     </div>}
                     <small className="helper">Goods received: {remaining === 0 ? 'Complete' : 'Pending'} · Payment: {p.paymentStatus || 'UNPAID'}</small>
