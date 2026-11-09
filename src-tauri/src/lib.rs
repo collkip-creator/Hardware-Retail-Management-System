@@ -296,6 +296,25 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         );
     ").map_err(|e| e.to_string())?;
 
+    // Ensure every existing active branch has a receiving warehouse.
+    let branch_ids = {
+        let mut statement = connection.prepare("SELECT id FROM branches WHERE status='active'").map_err(|e| e.to_string())?;
+        statement.query_map([], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    for branch_id in branch_ids {
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM warehouses WHERE branch_id=?1 AND status='active'",
+            [&branch_id], |row| row.get(0)
+        ).map_err(|e| e.to_string())?;
+        if count == 0 {
+            connection.execute(
+                "INSERT INTO warehouses(id,branch_id,name,status) VALUES(?1,?2,'Main Warehouse','active')",
+                params![Uuid::new_v4().to_string(), branch_id]
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
     Ok(())
 }
 
@@ -551,6 +570,7 @@ fn create_branch(database:tauri::State<'_,LocalDatabase>,actor_id:String,name:St
     let business:String=c.query_row("SELECT id FROM businesses LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     let id=Uuid::new_v4().to_string();
     c.execute("INSERT INTO branches(id,business_id,name,code) VALUES(?1,?2,?3,?4)",params![id,business,name,code]).map_err(|e|if e.to_string().contains("UNIQUE"){"That branch code is already in use.".into()}else{e.to_string()})?;
+    c.execute("INSERT INTO warehouses(id,branch_id,name,status) VALUES(?1,?2,'Main Warehouse','active')",params![Uuid::new_v4().to_string(),id]).map_err(|e|e.to_string())?;
     c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'BRANCH_CREATED','branch',?3)",params![Uuid::new_v4().to_string(),actor_id,id]).map_err(|e|e.to_string())?;
     Ok(BranchRecord{id,name:name.into(),code:Some(code),status:"active".into()})
 }
