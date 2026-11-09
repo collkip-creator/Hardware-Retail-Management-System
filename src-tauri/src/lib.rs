@@ -235,7 +235,9 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         "INSERT OR IGNORE INTO devices(id, device_name) VALUES(?1, 'This computer')",
         [&device_id],
     ).map_err(|e| e.to_string())?;
-    connection.execute("UPDATE app_meta SET value='2' WHERE key='schema_version'", [])
+    connection.execute("UPDATE app_meta SET value='3' WHERE key='schema_version'", [])
+        .map_err(|e| e.to_string())?;
+    connection.execute_batch("UPDATE sales SET customer_id=(SELECT c.id FROM customers c JOIN branches b ON b.business_id=c.business_id WHERE b.id=sales.branch_id AND c.phone=sales.customer_phone LIMIT 1) WHERE customer_id IS NULL AND customer_phone IS NOT NULL AND trim(customer_phone)<>'';")
         .map_err(|e| e.to_string())?;
 
 
@@ -904,7 +906,15 @@ fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, St
             "status":r.get::<_,String>(8)?,"mustChangePassword":r.get::<_,i64>(9)?==1}
     }))).map_err(|e|e.to_string())?;
     let staff=staff_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff}))
+    let mut customer_statement=connection.prepare("SELECT id,business_id,name,phone,email,address,kra_pin,notes,active,created_at,updated_at FROM customers ORDER BY created_at").map_err(|e|e.to_string())?;
+    let customer_rows=customer_statement.query_map([],|r|Ok(serde_json::json!({
+        "id":r.get::<_,String>(0)?,"businessId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?,
+        "phone":r.get::<_,String>(3)?,"email":r.get::<_,Option<String>>(4)?,"address":r.get::<_,Option<String>>(5)?,
+        "kraPin":r.get::<_,Option<String>>(6)?,"notes":r.get::<_,Option<String>>(7)?,"active":r.get::<_,i64>(8)?==1,
+        "createdAt":r.get::<_,String>(9)?,"updatedAt":r.get::<_,Option<String>>(10)?
+    }))).map_err(|e|e.to_string())?;
+    let customers=customer_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers}))
 }
 
 fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Value) -> Result<(), String> {
@@ -939,6 +949,18 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
                 "INSERT INTO branches(id,business_id,name,code,status) VALUES(?1,?2,?3,?4,?5)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,status=excluded.status",
                 params![id,business_id,branch["name"].as_str().unwrap_or("Branch"),branch["code"].as_str(),branch["status"].as_str().unwrap_or("active")],
+            ).map_err(|e|e.to_string())?;
+        }
+    }
+    if let Some(customers)=snapshot["customers"].as_array() {
+        for customer in customers {
+            let id=customer["id"].as_str().ok_or_else(||"A cloud customer has no ID.".to_string())?;
+            tx.execute(
+                "INSERT INTO customers(id,business_id,name,phone,email,address,kra_pin,notes,active,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,COALESCE(?10,CURRENT_TIMESTAMP),?11)
+                 ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,email=excluded.email,address=excluded.address,kra_pin=excluded.kra_pin,notes=excluded.notes,active=excluded.active,updated_at=excluded.updated_at",
+                params![id,business_id,customer["name"].as_str().unwrap_or("Customer"),customer["phone"].as_str().unwrap_or(""),
+                    customer["email"].as_str(),customer["address"].as_str(),customer["kraPin"].as_str(),customer["notes"].as_str(),
+                    if customer["active"].as_bool().unwrap_or(true){1}else{0},customer["createdAt"].as_str(),customer["updatedAt"].as_str()],
             ).map_err(|e|e.to_string())?;
         }
     }
