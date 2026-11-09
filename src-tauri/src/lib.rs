@@ -1077,7 +1077,7 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
     let actor: Option<(String,Option<String>)>=c.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
     let (role,assigned_branch)=actor.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
     let mut bs=c.prepare("SELECT id,name,code FROM branches WHERE status='active' AND (?1 IS NULL OR id=?1) ORDER BY name").map_err(|e|e.to_string())?;
-    let branches=bs.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let branches=bs.query_map([assigned_branch.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut customer_stmt=c.prepare("SELECT id,name,phone FROM customers WHERE active=1 AND business_id=(SELECT business_id FROM staff_profiles WHERE id=?1) ORDER BY name").map_err(|e|e.to_string())?;
     let customers=customer_stmt.query_map([&actor_staff_id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"phone":r.get::<_,String>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
