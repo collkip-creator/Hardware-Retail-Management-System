@@ -1250,6 +1250,21 @@ fn approve_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Stri
 }
 
 
+#[tauri::command]
+fn cancel_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,session_id:String,reason:String)->Result<(),String>{
+    let reason=reason.trim();if reason.len()<3||reason.len()>300{return Err("Enter a cancellation reason (3–300 characters).".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let (branch,status):(String,String)=c.query_row("SELECT branch_id,status FROM stocktake_sessions WHERE id=?1",[&session_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Stocktake session not found.".to_string())?;
+    ensure_branch_access(&c,&actor_staff_id,&branch)?;
+    if status!="OPEN"{return Err("Only open stocktakes can be cancelled.".into());}
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    tx.execute("UPDATE stocktake_sessions SET status='CANCELLED',approved_by=?1,approved_at=CURRENT_TIMESTAMP,notes=COALESCE(notes || ' | ','') || ?2 WHERE id=?3",params![actor_staff_id,format!("CANCELLED: {reason}"),session_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCKTAKE_CANCELLED','stocktake',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,session_id,serde_json::json!({"reason":reason}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -1290,7 +1305,8 @@ pub fn run() {
             create_stocktake,
             get_stocktake_details,
             save_stocktake_count,
-            approve_stocktake
+            approve_stocktake,
+            cancel_stocktake
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hardware Retail Management System");
