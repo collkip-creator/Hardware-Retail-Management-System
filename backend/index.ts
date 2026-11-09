@@ -863,6 +863,29 @@ export const handler = router({
     },
   ],
 
+  'POST /api/returns/:id/refund': [
+    requireAuth(),
+    async ctx => {
+      const userId = ctx.user!.userId;
+      const returns = await listOwned(userId, 'sales_returns');
+      const record = returns.find((item: any) => item.id === ctx.params.id);
+      if (!record) return error('Return record not found.', 404);
+      if (record.status !== 'REFUND_DUE') return error('This return is not awaiting a refund. It may already have been settled.', 409);
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const paymentMethod = textField(body.paymentMethod, 20).toUpperCase();
+      const reference = textField(body.reference, 100);
+      if (!['CASH', 'MPESA'].includes(paymentMethod)) return error('Choose Cash or M-Pesa as the refund method.', 400);
+      if (paymentMethod === 'MPESA' && !reference) return error('Enter the M-Pesa refund transaction code.', 400);
+      const now = new Date().toISOString();
+      const updated = { ...record, status: 'REFUNDED', refundMethod: paymentMethod, refundReference: reference, refundedAt: now, refundSettledBy: userId };
+      const [ok] = await db.update(table(userId, 'sales_returns'), [{ id: record.id, record: updated }]);
+      if (!ok) return error('Refund settlement could not be saved.', 500);
+      await postJournal(userId, { sourceType: 'RETURN_REFUND', sourceId: record.id, reference: reference || record.returnNumber, description: 'Refund paid for ' + record.returnNumber, lines: [{ accountCode: '2010', debit: Number(record.refundAmount) }, { accountCode: cashAccountCode(paymentMethod), credit: Number(record.refundAmount) }] });
+      await addOwned(userId, 'audit_logs', { action: 'CUSTOMER_REFUND_SETTLED', entityType: 'SALES_RETURN', entityId: record.id, reference: record.returnNumber, paymentMethod, refundAmount: record.refundAmount, refundReference: reference, createdAt: now });
+      return json({ returnRecord: { ...updated, id: record.id } }, 200);
+    },
+  ],
+
   'GET /api/suppliers': [
     requireAuth(),
     async ctx => json({ items: await listOwned(ctx.user!.userId, 'suppliers') }),
@@ -914,16 +937,41 @@ export const handler = router({
   'POST /api/purchases/:id/receive': [
     requireAuth(),
     async ctx => {
-      const userId = ctx.user!.userId; const purchases = await listOwned(userId, 'purchases'); const purchase = purchases.find((x: any) => x.id === ctx.params.id);
+      const userId = ctx.user!.userId;
+      const purchases = await listOwned(userId, 'purchases');
+      const purchase = purchases.find((x: any) => x.id === ctx.params.id);
       if (!purchase) return error('Purchase order not found.', 404);
+      const body = (ctx.body || {}) as Record<string, any>;
       const pending = (purchase.items || []).filter((x: any) => Number(x.receivedQuantity || 0) < Number(x.quantity));
       if (!pending.length) return error('All quantities on this purchase order have already been received.', 409);
-      const now = new Date().toISOString(); const movements = pending.map((x: any) => ({ type: 'RECEIPT', productId: x.productId, branchId: purchase.branchId, warehouseId: purchase.warehouseId, quantity: Number(x.quantity) - Number(x.receivedQuantity || 0), unitCost: Number(x.unitCost), totalCost: (Number(x.quantity) - Number(x.receivedQuantity || 0)) * Number(x.unitCost), reference: purchase.orderNumber, supplierId: purchase.supplierId, supplierInvoice: purchase.invoiceNumber, note: 'Purchase order goods received', ownerUserId: userId, createdAt: now, updatedAt: now }));
-      const ids = await db.add(table(userId, 'stock_movements'), movements); if (ids.some(id => !id)) throw new Error('Some stock receipt movements could not be saved. Review the stock ledger before retrying.');
-      const items = (purchase.items || []).map((x: any) => ({ ...x, receivedQuantity: x.quantity })); const [ok] = await db.update(table(userId, 'purchases'), [{ id: purchase.id, record: { ...purchase, items, status: 'RECEIVED', receivedAt: now, updatedAt: now } }]); if (!ok) throw new Error('Stock was received but the purchase order status could not be updated. Contact an administrator before retrying.');
-      const receivedValue = Math.round(pending.reduce((sum: number, item: any) => sum + (Number(item.quantity) - Number(item.receivedQuantity || 0)) * Number(item.unitCost || 0), 0) * 100) / 100;
-      if (receivedValue > 0) await postJournal(userId, { sourceType: 'PURCHASE_RECEIPT', sourceId: purchase.id, reference: purchase.orderNumber, description: 'Goods received for ' + purchase.orderNumber, lines: [{ accountCode: '1200', debit: receivedValue }, { accountCode: '2000', credit: receivedValue }] });
-      return json({ purchase: { ...purchase, items, status: 'RECEIVED', receivedAt: now }, receivedLines: pending.length }, 200);
+      const requested = Array.isArray(body.items) ? body.items : pending.map((x: any) => ({ productId: x.productId, quantity: Number(x.quantity) - Number(x.receivedQuantity || 0) }));
+      if (!requested.length || requested.length > 100) return error('Enter at least one item quantity to receive.', 400);
+      const seen = new Set<string>();
+      const receiptLines: any[] = [];
+      for (const raw of requested) {
+        const productId = textField(raw?.productId, 120);
+        const quantity = Number(raw?.quantity);
+        const line = pending.find((x: any) => x.productId === productId);
+        if (!line || seen.has(productId) || !Number.isFinite(quantity) || quantity <= 0) return error('Each receipt line must identify a pending product and a positive quantity.', 400);
+        const remaining = Number(line.quantity) - Number(line.receivedQuantity || 0);
+        if (quantity > remaining + 0.000001) return error('Received quantity cannot exceed the outstanding quantity for ' + line.productName + '.', 409);
+        seen.add(productId);
+        receiptLines.push({ ...line, receiveNow: quantity, remainingBefore: remaining });
+      }
+      const now = new Date().toISOString();
+      const movements = receiptLines.map((x: any) => ({ type: 'RECEIPT', productId: x.productId, branchId: purchase.branchId, warehouseId: purchase.warehouseId, quantity: x.receiveNow, unitCost: Number(x.unitCost), totalCost: x.receiveNow * Number(x.unitCost), reference: purchase.orderNumber, supplierId: purchase.supplierId, supplierInvoice: purchase.invoiceNumber, note: 'Purchase order partial goods receipt', ownerUserId: userId, createdAt: now, updatedAt: now }));
+      const ids = await db.add(table(userId, 'stock_movements'), movements);
+      if (ids.some(id => !id)) throw new Error('Some stock receipt movements could not be saved. Review the stock ledger before retrying.');
+      const receivedByProduct = new Map(receiptLines.map((x: any) => [x.productId, x.receiveNow]));
+      const items = (purchase.items || []).map((x: any) => ({ ...x, receivedQuantity: Math.min(Number(x.quantity), Number(x.receivedQuantity || 0) + Number(receivedByProduct.get(x.productId) || 0)) }));
+      const complete = items.every((x: any) => Number(x.receivedQuantity || 0) >= Number(x.quantity));
+      const nextStatus = complete ? 'RECEIVED' : 'PART_RECEIVED';
+      const [ok] = await db.update(table(userId, 'purchases'), [{ id: purchase.id, record: { ...purchase, items, status: nextStatus, receivedAt: complete ? now : purchase.receivedAt || null, lastReceiptAt: now, updatedAt: now } }]);
+      if (!ok) throw new Error('Stock was received but the purchase order status could not be updated. Contact an administrator before retrying.');
+      const receivedValue = Math.round(receiptLines.reduce((sum: number, item: any) => sum + item.receiveNow * Number(item.unitCost || 0), 0) * 100) / 100;
+      if (receivedValue > 0) await postJournal(userId, { sourceType: 'PURCHASE_RECEIPT', sourceId: purchase.id + ':' + now, reference: purchase.orderNumber, description: 'Goods received for ' + purchase.orderNumber, lines: [{ accountCode: '1200', debit: receivedValue }, { accountCode: '2000', credit: receivedValue }] });
+      await addOwned(userId, 'audit_logs', { action: 'PURCHASE_GOODS_RECEIVED', entityType: 'PURCHASE', entityId: purchase.id, reference: purchase.orderNumber, receivedLines: receiptLines.map((x: any) => ({ productId: x.productId, quantity: x.receiveNow })), receivedValue, createdAt: now });
+      return json({ purchase: { ...purchase, items, status: nextStatus, lastReceiptAt: now }, receivedLines: receiptLines.length, receivedQuantity: receiptLines.reduce((sum: number, x: any) => sum + x.receiveNow, 0), status: nextStatus }, 200);
     },
   ],
   'POST /api/purchases/:id/payments': [
