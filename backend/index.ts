@@ -515,11 +515,14 @@ export const handler = router({
       const manager = team.find((item: any) => item.id === ctx.params.id);
       if (!manager) return error('Team member not found.', 404);
       if (manager.role !== 'Branch Manager' || manager.status === 'inactive') return error('Only an active Branch Manager can be configured to approve discounts.', 403);
-      const pin = textField((ctx.body || {}).pin, 12);
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const pin = textField(body.pin, 12);
+      const discountLimitPercent = Number(body.discountLimitPercent);
       if (!/^\d{6}$/.test(pin)) return error('Set a six-digit discount approval PIN.', 400);
+      if (!Number.isFinite(discountLimitPercent) || discountLimitPercent <= 0 || discountLimitPercent > 100) return error('Set a maximum discount percentage greater than 0 and no more than 100.', 400);
       const salt = randomHex(16);
       const hash = await deriveDiscountPinHash(pin, salt);
-      const updated = { ...manager, discountPinSalt: salt, discountPinHash: hash, discountPinUpdatedAt: new Date().toISOString() };
+      const updated = { ...manager, discountPinSalt: salt, discountPinHash: hash, discountLimitPercent: Math.round(discountLimitPercent * 100) / 100, discountPinUpdatedAt: new Date().toISOString() };
       const [ok] = await db.update(table(userId, 'team'), [{ id: manager.id, record: updated }]);
       if (!ok) return error('The manager approval PIN could not be saved.', 500);
       return json({ ok: true, managerId: manager.id, discountPinConfigured: true });
@@ -780,6 +783,10 @@ export const handler = router({
         if (!managerId || !/^\d{6}$/.test(pin) || !reason) return error('Discounts require a configured Branch Manager, their six-digit approval PIN and a reason.', 400);
         approvedManager = await verifyDiscountManagerPin(userId, managerId, pin);
         if (!approvedManager) return error('Manager approval failed. Check the manager PIN or contact the Business Owner if the manager is locked after repeated failed attempts.', 403);
+        if (approvedManager.branchId && approvedManager.branchId !== branchId) return error('This Branch Manager is not authorised to approve discounts for the selected branch.', 403);
+        const requestedDiscountPercent = Math.max(...saleItems.map((item: any) => Number(item.discountPercent || 0)));
+        const allowedDiscountPercent = Number(approvedManager.discountLimitPercent ?? 100);
+        if (requestedDiscountPercent > allowedDiscountPercent + 0.000001) return error('The requested discount exceeds this manager’s authorised limit of ' + allowedDiscountPercent + '%. Ask a manager with a higher approval limit or the Business Owner.', 403);
       }
       if (!Array.isArray(body.payments) || !body.payments.length) return error('Enter at least one payment method.', 400);
       const payments = body.payments.map((p: any) => ({ method: textField(p.method, 20).toUpperCase(), amount: Number(p.amount), reference: textField(p.reference, 80) }));
@@ -796,7 +803,7 @@ export const handler = router({
         customerPhone: textField(body.customerPhone, 40),
         items: saleItems, payments, total, discountApproval: hasDiscount ? { managerId: approvedManager.id, managerName: approvedManager.name, reason: textField(approval.reason, 300), recordedAt: now } : null, status: 'COMPLETED', createdAt: now,
       });
-      if (hasDiscount) await addOwned(userId, 'audit_logs', { action: 'SALE_DISCOUNT_APPROVED', entityType: 'SALE', entityId: sale.id, reference: receiptNumber, managerId: approvedManager.id, managerName: approvedManager.name, reason: textField(approval.reason, 300), discountTotal: saleItems.reduce((sum,item)=>sum+item.discountAmount,0), createdAt: now });
+      if (hasDiscount) await addOwned(userId, 'audit_logs', { action: 'SALE_DISCOUNT_APPROVED', entityType: 'SALE', entityId: sale.id, reference: receiptNumber, managerId: approvedManager.id, managerName: approvedManager.name, managerBranchId: approvedManager.branchId || null, managerDiscountLimitPercent: Number(approvedManager.discountLimitPercent ?? 100), highestLineDiscountPercent: Math.max(...saleItems.map((item: any)=>Number(item.discountPercent || 0))), reason: textField(approval.reason, 300), discountTotal: saleItems.reduce((sum,item)=>sum+item.discountAmount,0), createdAt: now });
       const stockRows = saleItems.map(item => ({
         type: 'SALE', productId: item.productId, branchId, warehouseId,
         quantity: item.quantity, unitCost: 0, totalCost: 0,
