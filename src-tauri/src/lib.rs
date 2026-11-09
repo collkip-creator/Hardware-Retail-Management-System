@@ -989,7 +989,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
         let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
         let stock:f64=tx.query_row("SELECT COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
         let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();
-        if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0));}
+        if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
         let price=item["unitPrice"].as_f64().unwrap_or(product.2);
         if !price.is_finite()||price<0{return Err("Sale price cannot be negative.".into());}
         let line_total=(qty*price*100.0).round()/100.0;total+=line_total;
