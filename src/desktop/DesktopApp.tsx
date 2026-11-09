@@ -236,7 +236,7 @@ export default function DesktopApp() {
     const staffTabs: { id: Tab; label: string }[] = [
       { id: 'catalogue', label: 'Products & stock' },
       { id: 'pos', label: 'Point of sale' },
-      ...(['Manager', 'Storekeeper', 'Supervisor'].includes(session.role) ? [{ id: 'inventory' as Tab, label: 'Inventory' }, { id: 'procurement' as Tab, label: 'Suppliers & purchasing' }] : []),
+      ...(['Manager', 'Storekeeper'].includes(session.role) ? [{ id: 'inventory' as Tab, label: 'Inventory' }, { id: 'procurement' as Tab, label: 'Suppliers & purchasing' }] : []),
     ];
     const activeStaffTab = staffTabs.some(item => item.id === tab) ? tab : 'catalogue';
     return <main className="app-shell staff-shell">
