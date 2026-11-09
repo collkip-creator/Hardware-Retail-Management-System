@@ -573,7 +573,6 @@ async fn activate_desktop_licence(
 }
 
 #[tauri::command]
-#[tauri::command]
 async fn generate_desktop_pairing_code(
     database: tauri::State<'_, LocalDatabase>,
     actor_staff_id: String,
