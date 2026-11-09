@@ -240,8 +240,9 @@ fn setup_owner(
         return Err("Initial setup has already been completed. Sign in instead.".into());
     }
 
+    let activated_business_id = read_sync_value(&connection, "business_id")?;
     let transaction = connection.transaction().map_err(|e| e.to_string())?;
-    let business_id = Uuid::new_v4().to_string();
+    let business_id = activated_business_id.filter(|value| !value.is_empty()).unwrap_or_else(|| Uuid::new_v4().to_string());
     let staff_id = Uuid::new_v4().to_string();
     let account_id = Uuid::new_v4().to_string();
     let password_hash = hash_password(&password)?;
