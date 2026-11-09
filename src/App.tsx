@@ -135,6 +135,7 @@ function App() {
   const [customerSearch, setCustomerSearch] = useState('');
   const [discountApproval, setDiscountApproval] = useState({ managerId: '', pin: '', reason: '' });
   const [managerPinInputs, setManagerPinInputs] = useState<Record<string, string>>({});
+  const [managerDiscountLimitInputs, setManagerDiscountLimitInputs] = useState<Record<string, string>>({});
   const [returnForm, setReturnForm] = useState({ saleId: '', productId: '', quantity: '1', condition: 'RESTOCK', refundMethod: 'CASH', reason: '' });
   const [posCart, setPosCart] = useState<any[]>([]);
   const [posSearch, setPosSearch] = useState('');
@@ -471,9 +472,11 @@ function App() {
   }
   async function saveDiscountPin(managerId: string) {
     const pin = managerPinInputs[managerId] || '';
+    const discountLimitPercent = Number(managerDiscountLimitInputs[managerId] || '10');
     if (!/^\d{6}$/.test(pin)) { setError('Enter a six-digit manager approval PIN.'); return; }
+    if (!Number.isFinite(discountLimitPercent) || discountLimitPercent <= 0 || discountLimitPercent > 100) { setError('Enter a discount limit greater than 0% and no more than 100%.'); return; }
     setError(''); setNotice('');
-    try { await api.put('/api/team/' + managerId + '/discount-pin', { pin }); setManagerPinInputs({ ...managerPinInputs, [managerId]: '' }); setNotice('Discount approval PIN saved securely. The PIN itself is never displayed again.'); await loadWorkspace(); }
+    try { await api.put('/api/team/' + managerId + '/discount-pin', { pin, discountLimitPercent }); setManagerPinInputs({ ...managerPinInputs, [managerId]: '' }); setNotice('Manager approval PIN and discount limit saved securely.'); await loadWorkspace(); }
     catch (e: any) { setError(e?.response?.data?.error || e.message || 'Could not save manager PIN.'); }
   }
   async function saveSupplier(e: React.FormEvent) {
@@ -1483,7 +1486,7 @@ function App() {
                   {staff.map(s => (
                     <div className="record-row" key={s.id}>
                       <div className="record-icon"><Users size={18} /></div>
-                      <div className="record-copy"><strong>{s.name}</strong><small>{s.role} · {s.email}</small>{s.role === 'Branch Manager' && <div className="form-grid"><input aria-label={'Six-digit discount PIN for ' + s.name} type="password" inputMode="numeric" maxLength={6} placeholder="Set six-digit discount PIN" value={managerPinInputs[s.id] || ''} onChange={e=>setManagerPinInputs({...managerPinInputs,[s.id]:e.target.value.replace(/\D/g,'').slice(0,6)})}/><button className="secondary-button" onClick={()=>saveDiscountPin(s.id)}>Save approval PIN</button><small>{s.discountPinConfigured ? 'Discount approval PIN configured. Enter a new PIN to replace it.' : 'No discount approval PIN configured yet.'}</small></div>}</div>
+                      <div className="record-copy"><strong>{s.name}</strong><small>{s.role} · {s.email}</small>{s.role === 'Branch Manager' && <div className="form-grid"><label className="field"><span>Six-digit discount approval PIN</span><input aria-label={'Six-digit discount PIN for ' + s.name} type="password" inputMode="numeric" maxLength={6} placeholder="Set six-digit PIN" value={managerPinInputs[s.id] || ''} onChange={e=>setManagerPinInputs({...managerPinInputs,[s.id]:e.target.value.replace(/\D/g,'').slice(0,6)})}/></label><label className="field"><span>Maximum discount (%)</span><input type="number" min="0.01" max="100" step="0.01" value={managerDiscountLimitInputs[s.id] ?? String(s.discountLimitPercent ?? 10)} onChange={e=>setManagerDiscountLimitInputs({...managerDiscountLimitInputs,[s.id]:e.target.value})}/></label><button className="secondary-button" onClick={()=>saveDiscountPin(s.id)}>Save approval settings</button><small>{s.discountPinConfigured ? 'PIN configured. Enter a new PIN to replace it. Current limit: '+Number(s.discountLimitPercent ?? 100)+'%.' : 'No approval PIN configured yet. Set a PIN and discount limit.'}</small></div>}</div>
                       <span className="pending-tag">PROFILE</span>
                     </div>
                   ))}
