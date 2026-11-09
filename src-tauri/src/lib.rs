@@ -958,6 +958,7 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
     let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
     let products=ps.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut stock=Vec::new();
+    let mut valuation=Vec::new();
     for p in &products {
         let pid=p["id"].as_str().unwrap_or_default();
         let mut st=c.prepare("SELECT branch_id,COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 GROUP BY branch_id").map_err(|e|e.to_string())?;
@@ -1100,9 +1101,13 @@ fn get_inventory_workspace(database: tauri::State<'_, LocalDatabase>, actor_staf
     let mut products_stmt=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
     let products=products_stmt.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut stock=Vec::new();
+    let mut valuation=Vec::new();
     for p in &products { for b in &branches {
         let q=local_stock_balance(&c,p["id"].as_str().unwrap_or_default(),b["id"].as_str().unwrap_or_default())?;
         stock.push(serde_json::json!({"productId":p["id"],"branchId":b["id"],"quantity":q}));
+        let fallback=p["buyingPrice"].as_f64().unwrap_or(0.0);
+        let average:f64=c.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND quantity_delta>0 AND unit_cost>0",rusqlite::params![p["id"].as_str(),b["id"].as_str(),fallback],|r|r.get(0)).map_err(|e|e.to_string())?;
+        valuation.push(serde_json::json!({"productId":p["id"],"branchId":b["id"],"averageUnitCost":average,"stockValue":q*average}));
     }}
     let mut levels_stmt=c.prepare("SELECT product_id,branch_id,minimum_quantity,maximum_quantity FROM branch_reorder_levels WHERE (?1 IS NULL OR branch_id=?1)").map_err(|e|e.to_string())?;
     let levels=levels_stmt.query_map([scope.as_deref()],|r|Ok(serde_json::json!({"productId":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"minimumQuantity":r.get::<_,f64>(2)?,"maximumQuantity":r.get::<_,Option<f64>>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
@@ -1112,7 +1117,7 @@ fn get_inventory_workspace(database: tauri::State<'_, LocalDatabase>, actor_staf
     let transfers=transfers_stmt.query_map([scope.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"number":r.get::<_,String>(1)?,"fromBranchId":r.get::<_,String>(2)?,"fromBranch":r.get::<_,String>(3)?,"toBranchId":r.get::<_,String>(4)?,"toBranch":r.get::<_,String>(5)?,"status":r.get::<_,String>(6)?,"createdAt":r.get::<_,String>(7)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut takes_stmt=c.prepare("SELECT id,branch_id,status,created_at,notes FROM stocktake_sessions WHERE (?1 IS NULL OR branch_id=?1) ORDER BY created_at DESC LIMIT 30").map_err(|e|e.to_string())?;
     let stocktakes=takes_stmt.query_map([scope.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"status":r.get::<_,String>(2)?,"createdAt":r.get::<_,String>(3)?,"notes":r.get::<_,Option<String>>(4)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"role":role,"branches":branches,"products":products,"stock":stock,"reorderLevels":levels,"movements":movements,"transfers":transfers,"stocktakes":stocktakes,"transferBranches":transfer_branches}))
+    Ok(serde_json::json!({"role":role,"branches":branches,"products":products,"stock":stock,"valuation":valuation,"reorderLevels":levels,"movements":movements,"transfers":transfers,"stocktakes":stocktakes,"transferBranches":transfer_branches}))
 }
 
 #[tauri::command]
