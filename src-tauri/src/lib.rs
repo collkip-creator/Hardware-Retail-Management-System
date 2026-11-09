@@ -188,6 +188,17 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             connection.execute_batch(&format!("ALTER TABLE businesses ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
         }
     }
+    for (column, definition) in [
+        ("category", "TEXT NOT NULL DEFAULT 'General supplies'"),
+        ("brand", "TEXT"), ("variant", "TEXT"), ("purchase_unit", "TEXT"),
+        ("conversion_factor", "REAL NOT NULL DEFAULT 1"),
+        ("barcode", "TEXT"), ("reorder_level", "REAL NOT NULL DEFAULT 0"),
+        ("tax_category", "TEXT NOT NULL DEFAULT 'STANDARD'")
+    ] {
+        if !has_column(connection, "products", column)? {
+            connection.execute_batch(&format!("ALTER TABLE products ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
+        }
+    }
     if !has_column(connection, "staff_accounts", "must_change_password")? {
         connection.execute_batch("ALTER TABLE staff_accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;").map_err(|e| e.to_string())?;
     }
@@ -1269,6 +1280,59 @@ fn cancel_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
 }
 
 
+#[tauri::command]
+fn get_catalogue_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String)->Result<serde_json::Value,String>{
+ let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+ let actor:Option<(String,Option<String>)>=c.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+ let (role,assigned)=actor.ok_or_else(||"Your staff account is inactive.".to_string())?;
+ let mut bs=c.prepare("SELECT id,name,code FROM branches WHERE status='active' AND (?1 IS NULL OR id=?1) ORDER BY name").map_err(|e|e.to_string())?;
+ let branches=bs.query_map([assigned.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+ let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price,category,brand,variant,purchase_unit,conversion_factor,barcode,reorder_level,tax_category FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
+ let products=ps.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?,"category":r.get::<_,String>(6)?,"brand":r.get::<_,Option<String>>(7)?,"variant":r.get::<_,Option<String>>(8)?,"purchaseUnit":r.get::<_,Option<String>>(9)?,"conversionFactor":r.get::<_,f64>(10)?,"barcode":r.get::<_,Option<String>>(11)?,"reorderLevel":r.get::<_,f64>(12)?,"taxCategory":r.get::<_,String>(13)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+ let mut ss=c.prepare("SELECT product_id,branch_id,COALESCE(SUM(quantity_delta),SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity ELSE -quantity END),0) FROM stock_movements GROUP BY product_id,branch_id").map_err(|e|e.to_string())?;
+ let stock=ss.query_map([],|r|Ok(serde_json::json!({"productId":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"quantity":r.get::<_,f64>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+ let mut rs=c.prepare("SELECT m.id,m.product_id,p.name,m.branch_id,b.name,m.quantity,m.unit_cost,m.total_cost,m.reference,m.created_at FROM stock_movements m JOIN products p ON p.id=m.product_id JOIN branches b ON b.id=m.branch_id WHERE m.movement_type='RECEIPT' AND (?1 IS NULL OR m.branch_id=?1) ORDER BY m.created_at DESC LIMIT 30").map_err(|e|e.to_string())?;
+ let receipts=rs.query_map([assigned.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"productId":r.get::<_,String>(1)?,"productName":r.get::<_,String>(2)?,"branchId":r.get::<_,String>(3)?,"branchName":r.get::<_,String>(4)?,"quantity":r.get::<_,f64>(5)?,"unitCost":r.get::<_,f64>(6)?,"totalCost":r.get::<_,f64>(7)?,"reference":r.get::<_,Option<String>>(8)?,"createdAt":r.get::<_,String>(9)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+ let mut ws=c.prepare("SELECT id,branch_id,name FROM warehouses WHERE status='active' AND (?1 IS NULL OR branch_id=?1) ORDER BY name").map_err(|e|e.to_string())?;
+ let warehouses=ws.query_map([assigned.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"name":r.get::<_,String>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+ Ok(serde_json::json!({"role":role,"assignedBranchId":assigned,"branches":branches,"products":products,"stock":stock,"receipts":receipts,"warehouses":warehouses}))
+}
+
+#[tauri::command]
+fn save_catalogue_product(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,id:Option<String>,name:String,sku:String,unit:String,buying_price:f64,selling_price:f64,category:String,brand:Option<String>,variant:Option<String>,purchase_unit:Option<String>,conversion_factor:f64,barcode:Option<String>,reorder_level:f64,tax_category:String)->Result<serde_json::Value,String>{
+ let name=name.trim();let sku=sku.trim().to_uppercase();let unit=unit.trim();let category=category.trim();
+ if name.len()<2||name.len()>160||sku.len()<2||sku.len()>60||unit.is_empty()||category.is_empty()||!buying_price.is_finite()||buying_price<0.0||!selling_price.is_finite()||selling_price<0.0||!conversion_factor.is_finite()||conversion_factor<=0.0||!reorder_level.is_finite()||reorder_level<0.0{return Err("Check the product name, SKU, units, conversion and prices.".into());}
+ let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+ let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+ if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")|Some("Manager")){return Err("Your role cannot manage the product catalogue.".into());}
+ let business:String=c.query_row("SELECT id FROM businesses ORDER BY created_at LIMIT 1",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+ let pid=id.unwrap_or_else(||Uuid::new_v4().to_string());
+ let result=if c.query_row("SELECT COUNT(*) FROM products WHERE id=?1",[&pid],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?>0{
+ c.execute("UPDATE products SET name=?1,sku=?2,unit=?3,buying_price=?4,selling_price=?5,category=?6,brand=?7,variant=?8,purchase_unit=?9,conversion_factor=?10,barcode=?11,reorder_level=?12,tax_category=?13 WHERE id=?14 AND business_id=?15",params![name,sku,unit,buying_price,selling_price,category,brand,variant,purchase_unit,conversion_factor,barcode,reorder_level,tax_category,pid,business]).map_err(|e|if e.to_string().contains("UNIQUE"){"That SKU is already in use.".to_string()}else{e.to_string()})?;"PRODUCT_UPDATED"
+ }else{
+ c.execute("INSERT INTO products(id,business_id,name,sku,unit,buying_price,selling_price,category,brand,variant,purchase_unit,conversion_factor,barcode,reorder_level,tax_category) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![pid,business,name,sku,unit,buying_price,selling_price,category,brand,variant,purchase_unit,conversion_factor,barcode,reorder_level,tax_category]).map_err(|e|if e.to_string().contains("UNIQUE"){"That SKU is already in use.".to_string()}else{e.to_string()})?;"PRODUCT_CREATED"
+ };
+ c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,?3,'product',?4,?5)",params![Uuid::new_v4().to_string(),actor_staff_id,result,pid,serde_json::json!({"name":name,"sku":sku,"category":category}).to_string()]).map_err(|e|e.to_string())?;
+ Ok(serde_json::json!({"id":pid,"name":name,"sku":sku,"unit":unit,"category":category,"buyingPrice":buying_price,"sellingPrice":selling_price}))
+}
+
+#[tauri::command]
+fn receive_catalogue_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,product_id:String,branch_id:String,warehouse_id:Option<String>,quantity:f64,unit_cost:f64,reference:Option<String>,note:Option<String>)->Result<(),String>{
+ if !quantity.is_finite()||quantity<=0.0||!unit_cost.is_finite()||unit_cost<0.0{return Err("Enter a positive quantity and valid unit cost.".into());}
+ let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+ let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+ if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")|Some("Manager")){return Err("Your role cannot receive stock.".into());}
+ ensure_branch_access(&c,&actor_staff_id,&branch_id)?;ensure_branch_not_in_stocktake(&c,&branch_id)?;
+ let valid:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+ if valid==0{return Err("Select an active catalogue product.".into());}
+ if let Some(ref wid)=warehouse_id{let ok:i64=c.query_row("SELECT COUNT(*) FROM warehouses WHERE id=?1 AND branch_id=?2 AND status='active'",params![wid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;if ok==0{return Err("Select a warehouse belonging to the chosen branch.".into());}}
+ let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;let mid=Uuid::new_v4().to_string();
+ tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,warehouse_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,?4,'RECEIPT',?5,?5,?6,?7,?8,?9)",params![mid,product_id,branch_id,warehouse_id,quantity,unit_cost,quantity*unit_cost,reference,actor_staff_id]).map_err(|e|e.to_string())?;
+ tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCK_RECEIVED','stock_movement',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,mid,serde_json::json!({"productId":product_id,"branchId":branch_id,"warehouseId":warehouse_id,"quantity":quantity,"unitCost":unit_cost,"reference":reference,"note":note}).to_string()]).map_err(|e|e.to_string())?;
+ tx.commit().map_err(|e|e.to_string())
+}
+
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -1296,6 +1360,9 @@ pub fn run() {
             generate_desktop_pairing_code,
             sync_desktop_workspace,
             get_pos_workspace,
+            get_catalogue_workspace,
+            save_catalogue_product,
+            receive_catalogue_stock,
             create_pos_product,
             receive_pos_stock,
             open_pos_shift,
