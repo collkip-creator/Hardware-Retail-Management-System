@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - desktop/local-first-migration
+      - feature/offline-pos-foundation
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
