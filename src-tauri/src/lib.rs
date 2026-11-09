@@ -198,6 +198,14 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         }
     }
     for (column, definition) in [
+        ("cash_amount", "REAL NOT NULL DEFAULT 0"),
+        ("mpesa_amount", "REAL NOT NULL DEFAULT 0"),
+    ] {
+        if !has_column(connection, "sales", column)? {
+            connection.execute_batch(&format!("ALTER TABLE sales ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
+        }
+    }
+    for (column, definition) in [
         ("customer_id", "TEXT"),
         ("customer_name", "TEXT"),
         ("customer_phone", "TEXT"),
@@ -1188,11 +1196,12 @@ fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,
 }
 
 #[tauri::command]
-fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,payment_reference:Option<String>,customer_id:Option<String>,customer_name:Option<String>,customer_phone:Option<String>)->Result<serde_json::Value,String>{
+fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,cash_amount:f64,mpesa_amount:f64,payment_reference:Option<String>,customer_id:Option<String>,customer_name:Option<String>,customer_phone:Option<String>)->Result<serde_json::Value,String>{
     if items.is_empty()||items.len()>80{return Err("Add between 1 and 80 sale lines.".into());}
     let method=payment_method.trim().to_uppercase();
-    if !["CASH","MPESA"].contains(&method.as_str()){return Err("Select Cash or M-Pesa.".into());}
-    if method=="MPESA"&&payment_reference.as_deref().unwrap_or("").trim().is_empty(){return Err("Enter the M-Pesa transaction reference.".into());}
+    if !["CASH","MPESA","SPLIT"].contains(&method.as_str()){return Err("Select Cash, M-Pesa or split payment.".into());}
+    if !cash_amount.is_finite()||cash_amount<0.0||!mpesa_amount.is_finite()||mpesa_amount<0.0{return Err("Payment amounts must be valid non-negative numbers.".into());}
+    if mpesa_amount>0.0&&payment_reference.as_deref().unwrap_or("").trim().is_empty(){return Err("Enter the M-Pesa transaction reference.".into());}
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}
@@ -1225,7 +1234,10 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
         let phone=customer_phone.as_deref().unwrap_or("").trim().to_string();
         (None,if name.is_empty(){None}else{Some(name)},if phone.is_empty(){None}else{Some(phone)})
     };
-    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone]).map_err(|e|e.to_string())?;
+    if (cash_amount+mpesa_amount-total).abs()>0.01{return Err("Cash and M-Pesa payments must add up exactly to the sale total.".into());}
+    let actual_method=if cash_amount>0.0&&mpesa_amount>0.0{"SPLIT"}else if mpesa_amount>0.0{"MPESA"}else{"CASH"};
+    if method!=actual_method{return Err("Payment method does not match the entered payment amounts.".into());}
+    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone,cash_amount,mpesa_amount) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone,cash_amount,mpesa_amount]).map_err(|e|e.to_string())?;
     for line in &lines{
         let item_id=Uuid::new_v4().to_string();
         tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item_id,sale_id,line["productId"].as_str(),line["name"].as_str(),line["quantity"].as_f64(),line["unitPrice"].as_f64(),line["unitCost"].as_f64(),line["lineTotal"].as_f64()]).map_err(|e|e.to_string())?;
@@ -1245,7 +1257,7 @@ fn close_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String
     let row:Option<(String,String,f64)>=tx.query_row("SELECT branch_id,cashier_staff_id,opening_float FROM pos_shifts WHERE id=?1 AND status='OPEN'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?;
     let (branch,cashier,opening)=row.ok_or_else(||"This cashier shift is no longer open.".to_string())?;
     if cashier!=actor_staff_id{return Err("Only the cashier who opened this shift can close it.".into());}
-    let (cash_sales,mpesa_sales):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0),COALESCE(SUM(CASE WHEN payment_method='MPESA' THEN total ELSE 0 END),0) FROM sales WHERE shift_id=?1 AND status='COMPLETED'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+    let (cash_sales,mpesa_sales):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(CASE WHEN cash_amount>0 OR mpesa_amount>0 THEN cash_amount ELSE CASE WHEN payment_method='CASH' THEN total ELSE 0 END END),0),COALESCE(SUM(CASE WHEN cash_amount>0 OR mpesa_amount>0 THEN mpesa_amount ELSE CASE WHEN payment_method='MPESA' THEN total ELSE 0 END END),0) FROM sales WHERE shift_id=?1 AND status='COMPLETED'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
     let expected_cash=opening+cash_sales;
     let cash_variance=closing_cash-expected_cash;
     let mpesa_variance=closing_mpesa-mpesa_sales;
