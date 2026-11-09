@@ -140,7 +140,7 @@ td { color:#3d4d42; }
  .sidebar { min-height:auto; padding:14px; border-right:0; border-bottom:1px solid #e4ebe5; }
  .sidebar .brand { margin:0 0 13px; }
  .side-caption,.side-bottom { display:none; }
- .sidebar { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:3px; }
+ .sidebar { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:3px; }
  .sidebar .brand { grid-column:1/-1; }
  .nav-item { justify-content:center; padding:10px 4px; font-size:10px; gap:5px; flex-direction:column; }
  .main-area { padding:24px 17px; }
