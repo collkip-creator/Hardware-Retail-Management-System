@@ -981,7 +981,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
-    let mut total=0.0f64;let mut lines=Vec::new();
+    let mut total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();
     for item in &items{
         let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;
         let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;
@@ -990,10 +990,9 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
         let stock:f64=tx.query_row("SELECT COALESCE(SUM(CASE WHEN movement_type IN ('RECEIPT','RETURN') THEN quantity WHEN movement_type='SALE' THEN -quantity ELSE 0 END),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
         let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();
         if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
-        let price=item["unitPrice"].as_f64().unwrap_or(product.2);
-        if !price.is_finite()||price<0{return Err("Sale price cannot be negative.".into());}
+        let price=product.2;
         let line_total=(qty*price*100.0).round()/100.0;total+=line_total;
-        let unit_cost=product.3;
+        let unit_cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND movement_type='RECEIPT'",params![pid,branch_id,product.3],|r|r.get(0)).map_err(|e|e.to_string())?;
         lines.push(serde_json::json!({"productId":pid,"name":product.0,"quantity":qty,"unitPrice":price,"unitCost":unit_cost,"lineTotal":line_total}));
     }
     total=(total*100.0).round()/100.0;
