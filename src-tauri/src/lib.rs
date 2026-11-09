@@ -991,7 +991,7 @@ fn receive_pos_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Stri
     if !quantity.is_finite()||quantity<=0.0||!unit_cost.is_finite()||unit_cost<0.0{return Err("Enter a positive quantity and a valid unit cost.".into());}
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
-    if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can receive stock.".into());}
+    if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can receive stock.".into());}ensure_branch_access(&c,&actor_staff_id,&branch_id)?;ensure_branch_not_in_stocktake(&c,&branch_id)?;
     let valid:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     let branch:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if valid==0||branch==0{return Err("Select a valid product and active branch.".into());}
@@ -1028,6 +1028,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}
+    ensure_branch_not_in_stocktake(&c,&branch_id)?;
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
     let mut total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();
     for item in &items{
@@ -1196,6 +1197,7 @@ fn create_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
     ensure_branch_access(&c,&actor_staff_id,&branch_id)?;
     let valid:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;if valid==0{return Err("Select an active branch.".into());}
+    let open:i64=c.query_row("SELECT COUNT(*) FROM stocktake_sessions WHERE branch_id=?1 AND status='OPEN'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;if open>0{return Err("An open stocktake already exists for this branch.".into());}
     let id=Uuid::new_v4().to_string();let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO stocktake_sessions(id,branch_id,created_by,notes) VALUES(?1,?2,?3,?4)",params![id,branch_id,actor_staff_id,notes]).map_err(|e|e.to_string())?;
     let mut stmt=tx.prepare("SELECT id FROM products WHERE status='active'").map_err(|e|e.to_string())?;
