@@ -259,3 +259,36 @@ td { color:#3d4d42; }
 .catalogue-receive-form{display:grid;gap:11px}.catalogue-receive-form h3{margin:0 0 3px}
 @media(max-width:1000px){.catalogue-product-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){.catalogue-heading,.catalogue-receive-grid{grid-template-columns:1fr;display:grid}.catalogue-tools,.catalogue-form-grid{grid-template-columns:1fr}.catalogue-form-grid .wide{grid-column:auto}.catalogue-product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+
+/* Suppliers & purchasing parity workspace */
+.procurement-workspace{width:100%;max-width:1200px;margin:0 auto 28px}
+.procurement-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin:10px 0 18px}
+.procurement-toolbar h2{font-size:25px;margin:5px 0}.procurement-toolbar p{margin:0;color:#718078;font-size:12px}
+.procurement-tabs{display:flex;gap:6px;padding:4px;border:1px solid #e2eae3;background:#f7faf7;border-radius:11px}
+.procurement-tabs button{padding:9px 15px;border:0;border-radius:8px;background:transparent;color:#52645a;font-size:12px;font-weight:700}
+.procurement-tabs button.active{background:#174b35;color:#fff}
+.procurement-grid{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:16px}
+.procurement-grid>.content-card,.procurement-purchase-layout>.content-card{margin:0;min-width:0}
+.procurement-search{width:100%;margin:0 0 12px}
+.procurement-records,.procurement-orders{display:grid;gap:10px}
+.procurement-record{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid #e7eee8;border-radius:10px}
+.procurement-record .record-icon{flex:none;width:34px;height:34px;display:grid;place-items:center;border-radius:9px;background:#edf5ef;color:#245b3c}
+.procurement-record .record-copy{flex:1;min-width:0}.procurement-record .record-copy strong,.procurement-record .record-copy small{display:block}.procurement-record .record-copy small{font-size:10px;color:#7b8980;margin-top:3px;overflow-wrap:anywhere}
+.procurement-purchase-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.procurement-line{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(90px,.7fr) minmax(110px,.8fr) auto;gap:9px;align-items:end;padding:11px 0;border-bottom:1px solid #edf1ed}
+.procurement-line label,.procurement-payment label{display:grid;gap:5px;font-size:11px;color:#53645a}
+.procurement-line select,.procurement-line input,.procurement-payment input,.procurement-payment select{min-width:0;width:100%}
+.procurement-order-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:15px}
+.procurement-order{padding:14px;border:1px solid #e3ebe4;border-radius:11px;background:#fff}
+.procurement-order-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:10px;border-bottom:1px solid #edf1ed}
+.procurement-order-heading strong,.procurement-order-heading small{display:block}.procurement-order-heading small{font-size:10px;color:#7a887f;margin-top:4px}
+.procurement-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid #f0f3f0}
+.procurement-item>div:first-child strong,.procurement-item>div:first-child small{display:block}.procurement-item small{font-size:10px;color:#7b8980;margin-top:3px}
+.procurement-item>strong{font-size:12px;color:#214d36}
+.procurement-receive{grid-column:1/-1;display:flex;gap:8px;align-items:center}.procurement-receive input{max-width:150px}
+.procurement-balance{display:flex;justify-content:space-between;gap:10px;padding:12px 0;font-size:11px;color:#5e6d63}.procurement-balance strong{color:#174b35}
+.procurement-payment{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:12px;background:#f8faf8;border-radius:9px;margin:8px 0}
+.procurement-payment button{align-self:end}
+@media(max-width:1050px){.procurement-purchase-layout,.procurement-grid{grid-template-columns:1fr}}
+@media(max-width:720px){.procurement-toolbar{align-items:stretch;flex-direction:column}.procurement-line{grid-template-columns:1fr 1fr}.procurement-line label:first-child{grid-column:1/-1}.procurement-payment{grid-template-columns:1fr}.procurement-order-actions{align-items:stretch;flex-direction:column}}
