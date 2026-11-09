@@ -32,7 +32,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
   async function load() {
     const data = await invoke<Workspace>('get_pos_workspace', { actorStaffId: session.staffId });
     setWorkspace(data);
-    setBranchId(current => current || data.assignedBranchId || data.branches[0]?.id || '');
+    setBranchId(current => data.openShift?.branchId || current || data.assignedBranchId || data.branches[0]?.id || '');
   }
   useEffect(() => { load().catch(e => setError(String(e))); }, [session.staffId]);
 
