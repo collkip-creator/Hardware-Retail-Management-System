@@ -1237,6 +1237,35 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
 }
 
 
+#[tauri::command]
+fn close_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,shift_id:String,closing_cash:f64,closing_mpesa:f64)->Result<serde_json::Value,String>{
+    if !closing_cash.is_finite()||closing_cash<0.0||!closing_mpesa.is_finite()||closing_mpesa<0.0{return Err("Enter valid non-negative closing amounts.".into());}
+    let mut c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let tx=c.transaction().map_err(|e|e.to_string())?;
+    let row:Option<(String,String,f64)>=tx.query_row("SELECT branch_id,cashier_staff_id,opening_float FROM pos_shifts WHERE id=?1 AND status='OPEN'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?;
+    let (branch,cashier,opening)=row.ok_or_else(||"This cashier shift is no longer open.".to_string())?;
+    if cashier!=actor_staff_id{return Err("Only the cashier who opened this shift can close it.".into());}
+    let (cash_sales,mpesa_sales):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0),COALESCE(SUM(CASE WHEN payment_method='MPESA' THEN total ELSE 0 END),0) FROM sales WHERE shift_id=?1 AND status='COMPLETED'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+    let expected_cash=opening+cash_sales;
+    let cash_variance=closing_cash-expected_cash;
+    let mpesa_variance=closing_mpesa-mpesa_sales;
+    tx.execute("UPDATE pos_shifts SET closing_cash=?1,closing_mpesa=?2,status='CLOSED',closed_at=CURRENT_TIMESTAMP WHERE id=?3 AND status='OPEN'",params![closing_cash,closing_mpesa,shift_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SHIFT_CLOSED','pos_shift',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,shift_id,serde_json::json!({"branchId":branch,"cashSales":cash_sales,"mpesaSales":mpesa_sales,"openingFloat":opening,"closingCash":closing_cash,"closingMpesa":closing_mpesa,"cashVariance":cash_variance,"mpesaVariance":mpesa_variance}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"shiftId":shift_id,"openingFloat":opening,"cashSales":cash_sales,"mpesaSales":mpesa_sales,"expectedCash":expected_cash,"closingCash":closing_cash,"closingMpesa":closing_mpesa,"cashVariance":cash_variance,"mpesaVariance":mpesa_variance}))
+}
+
+#[tauri::command]
+fn get_pos_sales_history(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:Option<String>)->Result<Vec<serde_json::Value>,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,assigned,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Supervisor","Cashier"])?;
+    let selected=branch_id.or(assigned);
+    let mut stmt=c.prepare("SELECT s.id,s.receipt_number,s.branch_id,s.total,s.payment_method,COALESCE(s.payment_reference,''),COALESCE(s.customer_name,''),COALESCE(s.customer_phone,''),s.created_at,COALESCE(p.name,''),COALESCE(st.display_name,'') FROM sales s JOIN branches b ON b.id=s.branch_id LEFT JOIN staff_profiles st ON st.id=s.cashier_staff_id LEFT JOIN businesses p ON p.id=b.business_id WHERE b.business_id=?1 AND (?2 IS NULL OR s.branch_id=?2) ORDER BY s.created_at DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![business,selected],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"receiptNumber":r.get::<_,String>(1)?,"branchId":r.get::<_,String>(2)?,"total":r.get::<_,f64>(3)?,"paymentMethod":r.get::<_,String>(4)?,"paymentReference":r.get::<_,String>(5)?,"customerName":r.get::<_,String>(6)?,"customerPhone":r.get::<_,String>(7)?,"createdAt":r.get::<_,String>(8)?,"businessName":r.get::<_,String>(9)?,"cashier":r.get::<_,String>(10)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(rows)
+}
+
+
 fn inventory_actor_role(c: &Connection, actor_id: &str, allowed: &[&str]) -> Result<String, String> {
     let role: Option<String> = c.query_row(
         "SELECT role FROM staff_profiles WHERE id=?1 AND status='active'", [actor_id], |r| r.get(0)
@@ -1672,6 +1701,8 @@ pub fn run() {
             receive_pos_stock,
             open_pos_shift,
             process_pos_sale,
+            close_pos_shift,
+            get_pos_sales_history,
             get_inventory_workspace,
             save_reorder_level,
             adjust_inventory_stock,
