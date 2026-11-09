@@ -9,6 +9,7 @@ on:
       - feature/advanced-inventory-phase7
       - feature/catalogue-stock-ui-parity
       - feature/suppliers-purchasing-ui-parity
+      - feature/customers-desktop-phase
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
