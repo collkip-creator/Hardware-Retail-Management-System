@@ -251,6 +251,7 @@ export default function DesktopApp() {
         {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
         {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
         {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} />}
+        {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace session={session} />}
       </section>
     </main>;
   }
