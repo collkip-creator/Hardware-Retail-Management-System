@@ -43,7 +43,8 @@ export default function SuppliersPurchasingWorkspace({session}:{session:Session}
   const visibleSuppliers=useMemo(()=> (workspace?.suppliers||[]).filter(s=>[s.name,s.contactName,s.phone,s.email,s.kraPin].join(' ').toLowerCase().includes(supplierSearch.toLowerCase())),[workspace,supplierSearch]);
   const selectedWarehouseOptions=(workspace?.warehouses||[]).filter(w=>w.branchId===branchId);
   const orderTotal=lines.reduce((sum,x)=>sum+Number(x.quantity||0)*Number(x.unitCost||0),0);
-  const procurementBlockReason = !workspace.suppliers.some(x=>x.active) ? 'Add an active supplier before creating a purchase order.'
+  const procurementBlockReason = !workspace ? ''
+    : !workspace.suppliers.some(x=>x.active) ? 'Add an active supplier before creating a purchase order.'
     : !workspace.branches.length ? 'Create a branch in Business Setup before creating a purchase order.'
     : !workspace.warehouses.some(x=>x.branchId===branchId) ? 'This branch has no receiving warehouse. Restart the updated Windows app to create its Main Warehouse automatically.'
     : !workspace.products.length ? 'Add at least one active product to Products & Stock before creating a purchase order.'
