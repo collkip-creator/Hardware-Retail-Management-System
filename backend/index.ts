@@ -190,25 +190,29 @@ function cashAccountCode(method: string) {
 
 export const handler = router({
 
-  'POST /api/desktop/pairings': [
-    requireAuth(),
+  'POST /api/desktop/pairings/issue': [
     async ctx => {
-      const userId = ctx.user!.userId;
-      const devices = await db.list(table(userId, 'desktop_devices'), { limit: 100 });
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('Sign in on an authorised business computer before generating a pairing code.', 401);
+      if (!device.ownerDevice) return error('Only the primary Business Owner computer can generate pairing codes.', 403);
+      const devices = await db.list(table(device.userId, 'desktop_devices'), { limit: 100 });
+      const activeDevices = devices.items.filter((item: any) => item.status === 'active');
+      if (activeDevices.length >= 100) return error('The current device allowance has been reached. Contact the software provider to review your licence.', 403);
       const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 90000000 + 10000000);
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
       const record = {
-        userId,
+        userId: device.userId,
         codeHash: await sha256(code),
         createdAt: new Date().toISOString(),
         expiresAt,
         claimedAt: null,
         status: 'pending',
-        ownerDevice: devices.items.length === 0,
+        ownerDevice: false,
+        createdByDeviceId: device.deviceId,
       };
       const [id] = await db.add(desktopPairingTable, [record]);
       if (!id) return error('A pairing code could not be created. Please try again.', 500);
-      return json({ code, expiresAt, ownerDevice: record.ownerDevice });
+      return json({ code, expiresAt, ownerDevice: false });
     },
   ],
   'POST /api/desktop/pairings/claim': [
