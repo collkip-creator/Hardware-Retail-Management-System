@@ -1434,9 +1434,9 @@ fn create_purchase_order(database:tauri::State<'_,LocalDatabase>,actor_staff_id:
         lines.push(serde_json::json!({"productId":pid,"productName":name,"sku":sku,"unit":unit,"quantity":quantity,"receivedQuantity":0.0,"unitCost":unit_cost,"lineTotal":line_total}));
     }
     total=(total*100.0).round()/100.0;
-    let id=Uuid::new_v4().to_string();let order_number=format!("PO-{}",Uuid::new_v4().simple().to_string()[..10].to_uppercase());let now=chrono::Utc::now().to_rfc3339();
+    let id=Uuid::new_v4().to_string();let order_number=format!("PO-{}",Uuid::new_v4().simple().to_string()[..10].to_uppercase());
     let items_json=serde_json::to_string(&lines).map_err(|e|e.to_string())?;
-    c.execute("INSERT INTO purchase_orders(id,business_id,order_number,supplier_id,supplier_name,branch_id,warehouse_id,invoice_number,expected_date,notes,items_json,total,paid_amount,payments_json,status,payment_status,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'[]','ORDERED','UNPAID',?13)",params![id,business,order_number,supplier_id,supplier.0,branch_id,warehouse_id,invoice_number.trim(),expected_date.trim(),notes.trim(),items_json,total,now]).map_err(|e|e.to_string())?;
+    c.execute("INSERT INTO purchase_orders(id,business_id,order_number,supplier_id,supplier_name,branch_id,warehouse_id,invoice_number,expected_date,notes,items_json,total,paid_amount,payments_json,status,payment_status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'[]','ORDERED','UNPAID')",params![id,business,order_number,supplier_id,supplier.0,branch_id,warehouse_id,invoice_number.trim(),expected_date.trim(),notes.trim(),items_json,total]).map_err(|e|e.to_string())?;
     c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'PURCHASE_ORDER_CREATED','purchase_order',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"orderNumber":order_number,"total":total}).to_string()]).map_err(|e|e.to_string())?;
     Ok(serde_json::json!({"id":id,"orderNumber":order_number,"total":total,"status":"ORDERED"}))
 }
@@ -1453,7 +1453,7 @@ fn receive_purchase_goods(database:tauri::State<'_,LocalDatabase>,actor_staff_id
     if status=="CANCELLED"{return Err("A cancelled purchase order cannot receive goods.".into());}
     ensure_branch_access(&tx,&actor_staff_id,&branch)?;ensure_branch_not_in_stocktake(&tx,&branch)?;
     let mut lines:Vec<serde_json::Value>=serde_json::from_str(&items_json).map_err(|e|e.to_string())?;
-    let mut seen=std::collections::HashSet::new();let now=chrono::Utc::now().to_rfc3339();let mut received_total=0.0;
+    let mut seen=std::collections::HashSet::new();let mut received_total=0.0;
     for requested in items{
         let pid=requested["productId"].as_str().unwrap_or_default().to_string();let qty=requested["quantity"].as_f64().unwrap_or(0.0);
         if pid.is_empty()||!seen.insert(pid.clone())||!qty.is_finite()||qty<=0.0{return Err("Each receipt line must identify one product and a positive quantity.".into());}
@@ -1466,7 +1466,7 @@ fn receive_purchase_goods(database:tauri::State<'_,LocalDatabase>,actor_staff_id
     }
     let complete=lines.iter().all(|x|x["receivedQuantity"].as_f64().unwrap_or(0.0)+0.000001>=x["quantity"].as_f64().unwrap_or(0.0));
     let next=if complete{"RECEIVED"}else{"PART_RECEIVED"};let updated=serde_json::to_string(&lines).map_err(|e|e.to_string())?;
-    tx.execute("UPDATE purchase_orders SET items_json=?1,status=?2,updated_at=?3 WHERE id=?4",params![updated,next,now,purchase_id]).map_err(|e|e.to_string())?;
+    tx.execute("UPDATE purchase_orders SET items_json=?1,status=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?3",params![updated,next,purchase_id]).map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'PURCHASE_GOODS_RECEIVED','purchase_order',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,purchase_id,serde_json::json!({"orderNumber":order_number,"receivedValue":received_total,"items":items}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     Ok(serde_json::json!({"purchaseId":purchase_id,"status":next,"receivedValue":received_total,"total":total}))
@@ -1484,7 +1484,7 @@ fn record_supplier_payment(database:tauri::State<'_,LocalDatabase>,actor_staff_i
     let (total,paid,payments_json,order_number,supplier_name,status,order_business)=row.ok_or_else(||"Purchase order not found.".to_string())?;
     if order_business!=business{return Err("Purchase order does not belong to this business.".into());}
     let balance=(total-paid).max(0.0);if amount>balance+0.01{return Err("Payment cannot exceed the outstanding supplier balance.".into());}
-    let mut payments:Vec<serde_json::Value>=serde_json::from_str(&payments_json).unwrap_or_default();let now=chrono::Utc::now().to_rfc3339();
+    let mut payments:Vec<serde_json::Value>=serde_json::from_str(&payments_json).unwrap_or_default();let now:String=tx.query_row("SELECT CURRENT_TIMESTAMP",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     payments.push(serde_json::json!({"amount":amount,"paymentMethod":method,"reference":reference,"paidAt":now}));
     let next_paid=((paid+amount)*100.0).round()/100.0;let pay_status=if next_paid>=total-0.01{"PAID"}else{"PART_PAID"};
     let payments_json=serde_json::to_string(&payments).map_err(|e|e.to_string())?;
