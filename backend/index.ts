@@ -182,6 +182,26 @@ async function postJournal(userId: string, entry: {
   });
 }
 
+async function deriveDiscountPinHash(pin: string, saltHex: string) {
+  const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(value => parseInt(value, 16)));
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, key, 256);
+  return Array.from(new Uint8Array(bits), value => value.toString(16).padStart(2, '0')).join('');
+}
+async function verifyDiscountManagerPin(userId: string, managerId: string, pin: string) {
+  const team = await listOwned(userId, 'team');
+  const manager = team.find((item: any) => item.id === managerId && item.role === 'Branch Manager' && item.status !== 'inactive');
+  if (!manager?.discountPinSalt || !manager?.discountPinHash) return null;
+  const attempts = await listOwned(userId, 'discount_pin_attempts');
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  const recentFailures = attempts.filter((item: any) => item.managerId === managerId && !item.success && new Date(item.createdAt).getTime() >= cutoff);
+  if (recentFailures.length >= 5) return null;
+  const actual = await deriveDiscountPinHash(pin, manager.discountPinSalt);
+  const success = actual === manager.discountPinHash;
+  await addOwned(userId, 'discount_pin_attempts', { managerId, success, createdAt: new Date().toISOString() });
+  return success ? manager : null;
+}
+
 function cashAccountCode(method: string) {
   if (method === 'CASH') return '1000';
   if (method === 'MPESA') return '1010';
@@ -479,7 +499,31 @@ export const handler = router({
   ],
   'GET /api/team': [
     requireAuth(),
-    async ctx => json({ items: await listOwned(ctx.user!.userId, 'team') }),
+    async ctx => {
+      const items = await listOwned(ctx.user!.userId, 'team');
+      return json({ items: items.map((item: any) => {
+        const { discountPinSalt, discountPinHash, ...safe } = item;
+        return { ...safe, discountPinConfigured: Boolean(discountPinSalt && discountPinHash) };
+      }) });
+    },
+  ],
+  'PUT /api/team/:id/discount-pin': [
+    requireAuth(),
+    async ctx => {
+      const userId = ctx.user!.userId;
+      const team = await listOwned(userId, 'team');
+      const manager = team.find((item: any) => item.id === ctx.params.id);
+      if (!manager) return error('Team member not found.', 404);
+      if (manager.role !== 'Branch Manager' || manager.status === 'inactive') return error('Only an active Branch Manager can be configured to approve discounts.', 403);
+      const pin = textField((ctx.body || {}).pin, 12);
+      if (!/^\\d{6}$/.test(pin)) return error('Set a six-digit discount approval PIN.', 400);
+      const salt = randomHex(16);
+      const hash = await deriveDiscountPinHash(pin, salt);
+      const updated = { ...manager, discountPinSalt: salt, discountPinHash: hash, discountPinUpdatedAt: new Date().toISOString() };
+      const [ok] = await db.update(table(userId, 'team'), [{ id: manager.id, record: updated }]);
+      if (!ok) return error('The manager approval PIN could not be saved.', 500);
+      return json({ ok: true, managerId: manager.id, discountPinConfigured: true });
+    },
   ],
   'POST /api/team': [
     requireAuth(),
@@ -728,8 +772,15 @@ export const handler = router({
       const total = Math.round(saleItems.reduce((sum, item) => sum + item.lineTotal, 0) * 100) / 100;
       const hasDiscount = saleItems.some(item => item.discountPercent > 0);
       const approval = body.discountApproval || {};
-      if (hasDiscount && (!textField(approval.managerName, 120) || !textField(approval.reason, 300)))
-        return error('Discounted sales require a manager approval name and reason.', 400);
+      let approvedManager: any = null;
+      if (hasDiscount) {
+        const managerId = textField(approval.managerId, 120);
+        const pin = textField(approval.pin, 12);
+        const reason = textField(approval.reason, 300);
+        if (!managerId || !/^\\d{6}$/.test(pin) || !reason) return error('Discounts require a configured Branch Manager, their six-digit approval PIN and a reason.', 400);
+        approvedManager = await verifyDiscountManagerPin(userId, managerId, pin);
+        if (!approvedManager) return error('Manager approval failed. Check the manager PIN or contact the Business Owner if the manager is locked after repeated failed attempts.', 403);
+      }
       if (!Array.isArray(body.payments) || !body.payments.length) return error('Enter at least one payment method.', 400);
       const payments = body.payments.map((p: any) => ({ method: textField(p.method, 20).toUpperCase(), amount: Number(p.amount), reference: textField(p.reference, 80) }));
       if (payments.some((p: any) => !['CASH', 'MPESA'].includes(p.method) || !Number.isFinite(p.amount) || p.amount <= 0))
@@ -743,9 +794,9 @@ export const handler = router({
         receiptNumber, branchId, warehouseId, shiftId: shift.id,
         customerName: textField(body.customerName, 120) || 'Walk-in customer',
         customerPhone: textField(body.customerPhone, 40),
-        items: saleItems, payments, total, discountApproval: hasDiscount ? { managerName: textField(approval.managerName, 120), reason: textField(approval.reason, 300), recordedAt: now } : null, status: 'COMPLETED', createdAt: now,
+        items: saleItems, payments, total, discountApproval: hasDiscount ? { managerId: approvedManager.id, managerName: approvedManager.name, reason: textField(approval.reason, 300), recordedAt: now } : null, status: 'COMPLETED', createdAt: now,
       });
-      if (hasDiscount) await addOwned(userId, 'audit_logs', { action: 'SALE_DISCOUNT_APPROVED', entityType: 'SALE', entityId: sale.id, reference: receiptNumber, managerName: textField(approval.managerName, 120), reason: textField(approval.reason, 300), discountTotal: saleItems.reduce((sum,item)=>sum+item.discountAmount,0), createdAt: now });
+      if (hasDiscount) await addOwned(userId, 'audit_logs', { action: 'SALE_DISCOUNT_APPROVED', entityType: 'SALE', entityId: sale.id, reference: receiptNumber, managerId: approvedManager.id, managerName: approvedManager.name, reason: textField(approval.reason, 300), discountTotal: saleItems.reduce((sum,item)=>sum+item.discountAmount,0), createdAt: now });
       const stockRows = saleItems.map(item => ({
         type: 'SALE', productId: item.productId, branchId, warehouseId,
         quantity: item.quantity, unitCost: 0, totalCost: 0,
@@ -796,10 +847,27 @@ export const handler = router({
       if (!shift) return error('Open cashier shift not found.', 404);
       const body = (ctx.body || {}) as Record<string, unknown>;
       const closingCash = Number(body.closingCash);
-      if (!Number.isFinite(closingCash) || closingCash < 0) return error('Enter a valid closing cash count.', 400);
-      const [ok] = await db.update(table(userId, 'pos_shifts'), [{ id: shift.id, record: { ...shift, closingCash, status: 'CLOSED', closedAt: new Date().toISOString() } }]);
+      const closingMpesa = Number(body.closingMpesa);
+      if (!Number.isFinite(closingCash) || closingCash < 0 || !Number.isFinite(closingMpesa) || closingMpesa < 0) return error('Enter valid closing cash and M-Pesa balances.', 400);
+      const sales = await listOwned(userId, 'sales');
+      const returns = await listOwned(userId, 'sales_returns');
+      const shiftSales = sales.filter((sale: any) => sale.shiftId === shift.id && sale.status === 'COMPLETED');
+      const shiftRefunds = returns.filter((item: any) => item.refundShiftId === shift.id && item.status === 'REFUNDED');
+      const cashSales = shiftSales.reduce((sum: number, sale: any) => sum + (sale.payments || []).filter((p: any) => p.method === 'CASH').reduce((n: number, p: any) => n + Number(p.amount || 0), 0), 0);
+      const mpesaSales = shiftSales.reduce((sum: number, sale: any) => sum + (sale.payments || []).filter((p: any) => p.method === 'MPESA').reduce((n: number, p: any) => n + Number(p.amount || 0), 0), 0);
+      const cashRefunds = shiftRefunds.filter((item: any) => item.refundMethod === 'CASH').reduce((sum: number, item: any) => sum + Number(item.refundAmount || 0), 0);
+      const mpesaRefunds = shiftRefunds.filter((item: any) => item.refundMethod === 'MPESA').reduce((sum: number, item: any) => sum + Number(item.refundAmount || 0), 0);
+      const expectedCash = Math.round((Number(shift.openingFloat || 0) + cashSales - cashRefunds) * 100) / 100;
+      const expectedMpesa = Math.round((mpesaSales - mpesaRefunds) * 100) / 100;
+      const cashVariance = Math.round((closingCash - expectedCash) * 100) / 100;
+      const mpesaVariance = Math.round((closingMpesa - expectedMpesa) * 100) / 100;
+      const summary = { openingFloat: Number(shift.openingFloat || 0), cashSales, mpesaSales, cashRefunds, mpesaRefunds, expectedCash, expectedMpesa, closingCash, closingMpesa, cashVariance, mpesaVariance, totalExpected: Math.round((expectedCash + expectedMpesa) * 100) / 100, totalCounted: Math.round((closingCash + closingMpesa) * 100) / 100, totalVariance: Math.round((cashVariance + mpesaVariance) * 100) / 100, saleCount: shiftSales.length, refundCount: shiftRefunds.length };
+      const now = new Date().toISOString();
+      const closedShift = { ...shift, ...summary, reconciliation: summary, status: 'CLOSED', closedAt: now };
+      const [ok] = await db.update(table(userId, 'pos_shifts'), [{ id: shift.id, record: closedShift }]);
       if (!ok) return error('The cashier shift could not be closed.', 500);
-      return json({ shift: { ...shift, closingCash, status: 'CLOSED' } });
+      await addOwned(userId, 'audit_logs', { action: 'CASHIER_SHIFT_RECONCILED', entityType: 'POS_SHIFT', entityId: shift.id, reference: shift.id, ...summary, createdAt: now });
+      return json({ shift: closedShift, reconciliation: summary });
     },
   ],
 
@@ -877,7 +945,10 @@ export const handler = router({
       if (!['CASH', 'MPESA'].includes(paymentMethod)) return error('Choose Cash or M-Pesa as the refund method.', 400);
       if (paymentMethod === 'MPESA' && !reference) return error('Enter the M-Pesa refund transaction code.', 400);
       const now = new Date().toISOString();
-      const updated = { ...record, status: 'REFUNDED', refundMethod: paymentMethod, refundReference: reference, refundedAt: now, refundSettledBy: userId };
+      const openShifts = await listOwned(userId, 'pos_shifts');
+      const refundShift = openShifts.find((item: any) => item.status === 'OPEN' && item.branchId === record.branchId);
+      if (!refundShift) return error('Open a cashier shift for this branch before paying a cash or M-Pesa refund.', 409);
+      const updated = { ...record, status: 'REFUNDED', refundMethod: paymentMethod, refundReference: reference, refundedAt: now, refundSettledBy: userId, refundShiftId: refundShift.id };
       const [ok] = await db.update(table(userId, 'sales_returns'), [{ id: record.id, record: updated }]);
       if (!ok) return error('Refund settlement could not be saved.', 500);
       await postJournal(userId, { sourceType: 'RETURN_REFUND', sourceId: record.id, reference: reference || record.returnNumber, description: 'Refund paid for ' + record.returnNumber, lines: [{ accountCode: '2010', debit: Number(record.refundAmount) }, { accountCode: cashAccountCode(paymentMethod), credit: Number(record.refundAmount) }] });
