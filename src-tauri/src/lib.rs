@@ -155,6 +155,15 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             quantity REAL NOT NULL, unit_price REAL NOT NULL, unit_cost REAL NOT NULL DEFAULT 0,
             line_total REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS customers (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            name TEXT NOT NULL, phone TEXT NOT NULL, email TEXT, address TEXT,
+            kra_pin TEXT, notes TEXT, active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_customers_business_name ON customers(business_id,name);
+        CREATE INDEX IF NOT EXISTS idx_customers_business_phone ON customers(business_id,phone);
 
         ",
     ).map_err(|e| e.to_string())?;
@@ -186,6 +195,15 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     for (column, definition) in [("phone", "TEXT"), ("email", "TEXT"), ("address", "TEXT"), ("logo_data_url", "TEXT")] {
         if !has_column(connection, "businesses", column)? {
             connection.execute_batch(&format!("ALTER TABLE businesses ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
+        }
+    }
+    for (column, definition) in [
+        ("customer_id", "TEXT"),
+        ("customer_name", "TEXT"),
+        ("customer_phone", "TEXT"),
+    ] {
+        if !has_column(connection, "sales", column)? {
+            connection.execute_batch(&format!("ALTER TABLE sales ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
         }
     }
     for (column, definition) in [
@@ -1018,6 +1036,8 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
     let (role,assigned_branch)=actor.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
     let mut bs=c.prepare("SELECT id,name,code FROM branches WHERE status='active' AND (?1 IS NULL OR id=?1) ORDER BY name").map_err(|e|e.to_string())?;
     let branches=bs.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"code":r.get::<_,Option<String>>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut customer_stmt=c.prepare("SELECT id,name,phone FROM customers WHERE active=1 AND business_id=(SELECT business_id FROM staff_profiles WHERE id=?1) ORDER BY name").map_err(|e|e.to_string())?;
+    let customers=customer_stmt.query_map([&actor_staff_id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"phone":r.get::<_,String>(2)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut ps=c.prepare("SELECT id,name,sku,unit,buying_price,selling_price FROM products WHERE status='active' ORDER BY name").map_err(|e|e.to_string())?;
     let products=ps.query_map([],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"sku":r.get::<_,String>(2)?,"unit":r.get::<_,String>(3)?,"buyingPrice":r.get::<_,f64>(4)?,"sellingPrice":r.get::<_,f64>(5)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut stock=Vec::new();
@@ -1028,7 +1048,58 @@ fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: 
         for row in rows { stock.push(serde_json::json!({"productId":pid,"branchId":row["branchId"],"quantity":row["quantity"]})); }
     }
     let open_shift: Option<serde_json::Value>=c.query_row("SELECT id,branch_id,opening_float,opened_at FROM pos_shifts WHERE cashier_staff_id=?1 AND status='OPEN' ORDER BY opened_at DESC LIMIT 1",[&actor_staff_id],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"branchId":r.get::<_,String>(1)?,"openingFloat":r.get::<_,f64>(2)?,"openedAt":r.get::<_,String>(3)?}))).optional().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"role":role,"assignedBranchId":assigned_branch,"branches":branches,"products":products,"stock":stock,"openShift":open_shift}))
+    Ok(serde_json::json!({"role":role,"assignedBranchId":assigned_branch,"branches":branches,"products":products,"stock":stock,"customers":customers,"openShift":open_shift}))
+}
+
+#[tauri::command]
+fn get_customers_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String)->Result<serde_json::Value,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (role,branch,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Supervisor","Cashier"])?;
+    let mut stmt=c.prepare("SELECT id,name,phone,COALESCE(email,''),COALESCE(address,''),COALESCE(kra_pin,''),COALESCE(notes,''),active,created_at FROM customers WHERE business_id=?1 ORDER BY name COLLATE NOCASE").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"phone":r.get::<_,String>(2)?,"email":r.get::<_,String>(3)?,"address":r.get::<_,String>(4)?,"kraPin":r.get::<_,String>(5)?,"notes":r.get::<_,String>(6)?,"active":r.get::<_,i64>(7)?==1,"createdAt":r.get::<_,String>(8)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut customers=Vec::new();
+    for mut customer in rows {
+        let cid=customer["id"].as_str().unwrap_or_default().to_string();
+        let mut history_stmt=c.prepare("SELECT id,receipt_number,total,payment_method,created_at FROM sales WHERE customer_id=?1 AND (?2 IS NULL OR branch_id=?2) ORDER BY created_at DESC LIMIT 10").map_err(|e|e.to_string())?;
+        let history=history_stmt.query_map(params![cid,branch.as_deref()],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"receiptNumber":r.get::<_,String>(1)?,"total":r.get::<_,f64>(2)?,"paymentMethod":r.get::<_,String>(3)?,"createdAt":r.get::<_,String>(4)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        let (count,spend,last):(i64,f64,Option<String>)=c.query_row("SELECT COUNT(*),COALESCE(SUM(total),0),MAX(created_at) FROM sales WHERE customer_id=?1 AND (?2 IS NULL OR branch_id=?2)",params![cid,branch.as_deref()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?;
+        customer["salesCount"]=serde_json::json!(count);
+        customer["totalSpend"]=serde_json::json!(spend);
+        customer["lastPurchaseAt"]=serde_json::json!(last);
+        customer["history"]=serde_json::json!(history);
+        customers.push(customer);
+    }
+    Ok(serde_json::json!({"role":role,"assignedBranchId":branch,"customers":customers}))
+}
+
+#[tauri::command]
+fn save_customer(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,id:Option<String>,name:String,phone:String,email:String,address:String,kra_pin:String,notes:String)->Result<serde_json::Value,String>{
+    let name=name.trim();let phone=phone.trim();
+    if name.len()<2||name.len()>160{return Err("Customer name must be between 2 and 160 characters.".into());}
+    if phone.is_empty()||phone.len()>40{return Err("Enter a valid customer phone number.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Supervisor","Cashier"])?;
+    let cid=id.unwrap_or_else(||Uuid::new_v4().to_string());
+    let duplicate:i64=c.query_row("SELECT COUNT(*) FROM customers WHERE business_id=?1 AND id<>?2 AND phone=?3",params![business,cid,phone],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if duplicate>0{return Err("A customer with this phone number already exists. Search the directory before adding another record.".into());}
+    let exists:i64=c.query_row("SELECT COUNT(*) FROM customers WHERE id=?1 AND business_id=?2",params![cid,business],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if exists>0{
+        c.execute("UPDATE customers SET name=?1,phone=?2,email=?3,address=?4,kra_pin=?5,notes=?6,updated_at=CURRENT_TIMESTAMP WHERE id=?7 AND business_id=?8",params![name,phone,email.trim(),address.trim(),kra_pin.trim(),notes.trim(),cid,business]).map_err(|e|e.to_string())?;
+    }else{
+        c.execute("INSERT INTO customers(id,business_id,name,phone,email,address,kra_pin,notes) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![cid,business,name,phone,email.trim(),address.trim(),kra_pin.trim(),notes.trim()]).map_err(|e|e.to_string())?;
+    }
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,?3,'customer',?4,?5)",params![Uuid::new_v4().to_string(),actor_staff_id,if exists>0{"CUSTOMER_UPDATED"}else{"CUSTOMER_CREATED"},cid,serde_json::json!({"name":name,"phone":phone}).to_string()]).map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"id":cid,"name":name,"phone":phone,"email":email,"address":address,"kraPin":kra_pin,"notes":notes,"active":true}))
+}
+
+#[tauri::command]
+fn set_customer_status(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,customer_id:String,active:bool)->Result<(),String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let changed=c.execute("UPDATE customers SET active=?1,updated_at=CURRENT_TIMESTAMP WHERE id=?2 AND business_id=?3",params![if active{1}else{0},customer_id,business]).map_err(|e|e.to_string())?;
+    if changed==0{return Err("Customer record not found.".into());}
+    c.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,?3,'customer',?4,?5)",params![Uuid::new_v4().to_string(),actor_staff_id,if active{"CUSTOMER_REACTIVATED"}else{"CUSTOMER_DEACTIVATED"},customer_id,serde_json::json!({"active":active}).to_string()]).map_err(|e|e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1083,7 +1154,7 @@ fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,
 }
 
 #[tauri::command]
-fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,payment_reference:Option<String>)->Result<serde_json::Value,String>{
+fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,payment_reference:Option<String>,customer_id:Option<String>,customer_name:Option<String>,customer_phone:Option<String>)->Result<serde_json::Value,String>{
     if items.is_empty()||items.len()>80{return Err("Add between 1 and 80 sale lines.".into());}
     let method=payment_method.trim().to_uppercase();
     if !["CASH","MPESA"].contains(&method.as_str()){return Err("Select Cash or M-Pesa.".into());}
@@ -1111,7 +1182,16 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     total=(total*100.0).round()/100.0;
     let receipt=format!("HR-{}",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>().to_uppercase());
     let sale_id=Uuid::new_v4().to_string();
-    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference]).map_err(|e|e.to_string())?;
+    let (linked_customer_id, linked_customer_name, linked_customer_phone) = if let Some(cid)=customer_id.as_deref() {
+        let row:Option<(String,String)>=tx.query_row("SELECT name,phone FROM customers WHERE id=?1 AND business_id=(SELECT business_id FROM branches WHERE id=?2) AND active=1",params![cid,branch_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+        let (name,phone)=row.ok_or_else(||"The selected customer is unavailable for this business.".to_string())?;
+        (Some(cid.to_string()),Some(name),Some(phone))
+    } else {
+        let name=customer_name.as_deref().unwrap_or("").trim().to_string();
+        let phone=customer_phone.as_deref().unwrap_or("").trim().to_string();
+        (None,if name.is_empty(){None}else{Some(name)},if phone.is_empty(){None}else{Some(phone)})
+    };
+    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone]).map_err(|e|e.to_string())?;
     for line in &lines{
         let item_id=Uuid::new_v4().to_string();
         tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item_id,sale_id,line["productId"].as_str(),line["name"].as_str(),line["quantity"].as_f64(),line["unitPrice"].as_f64(),line["unitCost"].as_f64(),line["lineTotal"].as_f64()]).map_err(|e|e.to_string())?;
@@ -1119,7 +1199,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     }
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SALE_COMPLETED','sale',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,sale_id,serde_json::json!({"receiptNumber":receipt,"total":total,"paymentMethod":method}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"total":total,"paymentMethod":method,"items":lines}))
+    Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"total":total,"paymentMethod":method,"customerId":linked_customer_id,"customerName":linked_customer_name,"customerPhone":linked_customer_phone,"items":lines}))
 }
 
 
@@ -1545,6 +1625,9 @@ pub fn run() {
             get_pos_workspace,
             get_catalogue_workspace,
             get_procurement_workspace,
+            get_customers_workspace,
+            save_customer,
+            set_customer_status,
             save_supplier,
             create_purchase_order,
             receive_purchase_goods,
