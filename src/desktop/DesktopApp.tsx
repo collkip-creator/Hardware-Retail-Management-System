@@ -98,7 +98,7 @@ export default function DesktopApp() {
       const next = await invoke<SyncStatus>('get_device_sync_status');
       setSyncStatus(next);
       setStatus(await invoke<LocalStatus>('get_local_status'));
-      setNotice('Licence activated successfully. This computer is now the primary Business Owner computer. Create the local Business Owner account to continue.');
+      setNotice(session ? 'Licence activated successfully. This computer is now linked to your existing Business Owner workspace.' : 'Licence activated successfully. This computer is now the primary Business Owner computer. Create the local Business Owner account to continue.');
     } catch (e) { setError(String(e).replace(/^Error: /, '')); }
     finally { setBusy(false); }
   }
@@ -195,6 +195,8 @@ export default function DesktopApp() {
       <div className="status-line"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Internet available' : 'Offline mode'} <span>· Local database ready</span></div>
       <h1>{status.setupRequired ? 'Set up this computer' : 'Sign in to your business'}</h1>
       <p className="muted">{status.setupRequired ? 'Create the first Business Owner account. Your account is stored securely on this computer.' : 'Sign in using your local staff username and password. Offline sign-in is supported after the account is registered on this computer.'}</p>
+      {error && <p className="error" role="alert">{error}</p>}
+      {notice && <p className="success" role="status">{notice}</p>}
       {!syncStatus.paired && <div className="pair-device-card">
         <h2>Activate your business licence</h2>
         <p>{status.setupRequired ? 'Enter the licence key issued by Collkip. The first computer activated becomes the primary Business Owner computer.' : 'This computer is not yet linked to a licensed business. Enter the licence key issued by Collkip to activate it as the primary Business Owner computer.'}</p>
@@ -254,6 +256,7 @@ export default function DesktopApp() {
         {credentials&&<div className="credential-box"><h3>New staff login credentials</h3><p>Share these details securely with the staff member. The temporary password is displayed only this once.</p><div className="credential-line"><span>Username</span><strong>{credentials.username}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.username)}>Copy</button></div><div className="credential-line"><span>Temporary password</span><strong>{credentials.temporaryPassword}</strong><button className="secondary" type="button" onClick={()=>navigator.clipboard.writeText(credentials.temporaryPassword)}>Copy</button></div><button className="secondary" onClick={()=>navigator.clipboard.writeText(`Username: ${credentials.username}\nTemporary password: ${credentials.temporaryPassword}`)}>Copy both credentials</button></div>}
       </div><div className="content-card"><div className="section-heading"><div><h2>Staff accounts</h2><p>{staff.length} account(s) stored on this computer.</p></div></div>{staff.length===0?<Empty text="No staff accounts have been created yet."/>:<DataTable headers={['Name','Username','Role','Status']} rows={staff.map(s=>[s.displayName,s.username,s.role,s.status])}/>}</div></>}
       {tab==='devices'&&<div className="content-card"><div className="section-heading"><div><h2>Computer devices</h2><p>Manage authorised computers for this business. Only the primary computer can generate pairing codes.</p></div></div>
+        {!syncStatus.paired&&<div className="pair-device-card"><h2>Activate business licence</h2><p>This existing Business Owner workspace has not yet been linked to a Collkip licence. Activate it here without creating another local owner account.</p><form onSubmit={activateLicence}><label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label><button className="primary" type="submit" disabled={busy||!online||licenceKey.trim().length<12}>{busy?'Activating…':'Activate licence'}</button></form></div>}
         <div className="device-sync-status"><strong>{syncStatus.paired?'Paired with owner portal':'Not yet paired'}</strong><span>{syncStatus.paired?(syncStatus.ownerDevice?'Primary owner computer':'Additional business computer'):'The Business Owner generates a code on the primary computer.'}</span><small>Last successful sync: {syncStatus.lastSyncAt?new Date(syncStatus.lastSyncAt).toLocaleString():'Not yet synchronised'}</small></div>
         {!syncStatus.paired&&<form className="inline-form" onSubmit={pairThisComputer}><label>8-digit pairing code<input value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\D/g,'').slice(0,8))} inputMode="numeric" maxLength={8} placeholder="Enter pairing code" required/></label><button className="primary" disabled={busy||syncing||pairingCode.length!==8||!online}>Pair this computer</button></form>}
         {syncStatus.paired&&<div className="device-actions">
