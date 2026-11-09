@@ -5,11 +5,12 @@ type Session = { staffId:string; role:string; branchId:string|null };
 type Branch = { id:string; name:string; code?:string|null };
 type Product = { id:string; name:string; sku:string; unit:string };
 type Stock = { productId:string; branchId:string; quantity:number };
+type Valuation = { productId:string; branchId:string; averageUnitCost:number; stockValue:number };
 type Level = { productId:string; branchId:string; minimumQuantity:number; maximumQuantity:number|null };
 type Transfer = { id:string; number:string; fromBranchId:string; fromBranch:string; toBranchId:string; toBranch:string; status:string; createdAt:string };
 type Movement = { id:string; productName:string; branchName:string; type:string; quantityDelta:number; reference:string|null; createdAt:string };
 type Take = { id:string; branchId:string; status:string; createdAt:string; notes:string|null };
-type Workspace = { role:string; branches:Branch[]; transferBranches:Branch[]; products:Product[]; stock:Stock[]; reorderLevels:Level[]; movements:Movement[]; transfers:Transfer[]; stocktakes:Take[] };
+type Workspace = { role:string; branches:Branch[]; transferBranches:Branch[]; products:Product[]; stock:Stock[]; valuation:Valuation[]; reorderLevels:Level[]; movements:Movement[]; transfers:Transfer[]; stocktakes:Take[] };
 type CountLine = { productId:string; name:string; sku:string; unit:string; systemQuantity:number; countedQuantity:number|null };
 
 export default function InventoryWorkspace({session}:{session:Session}) {
@@ -39,7 +40,7 @@ export default function InventoryWorkspace({session}:{session:Session}) {
   <div className="inventory-metrics"><div className="metric-card"><span>Products tracked</span><strong>{data.products.length}</strong></div><div className="metric-card"><span>Low-stock alerts</span><strong>{alerts.length}</strong></div><div className="metric-card"><span>Transfers in progress</span><strong>{data.transfers.filter(t=>t.status==='IN_TRANSIT').length}</strong></div></div>
   <section className="content-card"><div className="section-heading"><div><h3>Stock on hand</h3><p>Current quantities by branch and product.</p></div></div>
    <label className="inventory-filter">Branch<select value={branchId} onChange={e=>setBranchId(e.target.value)}>{data.branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></label>
-   <div className="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Minimum</th><th>Maximum</th><th>Status</th></tr></thead><tbody>{data.products.map(p=>{const q=stock(p.id,branchId),l=data.reorderLevels.find(x=>x.productId===p.id&&x.branchId===branchId);return <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{q} {p.unit}</td><td>{l?.minimumQuantity??'—'}</td><td>{l?.maximumQuantity??'—'}</td><td>{l&&q<l.minimumQuantity?'LOW STOCK':'OK'}</td></tr>;})}</tbody></table></div>
+   <div className="table-wrap"><table><thead><tr><th>Product</th><th>SKU</th><th>On hand</th><th>Avg. cost</th><th>Stock value</th><th>Minimum</th><th>Maximum</th><th>Status</th></tr></thead><tbody>{data.products.map(p=>{const q=stock(p.id,branchId),l=data.reorderLevels.find(x=>x.productId===p.id&&x.branchId===branchId);return <tr key={p.id}><td>{p.name}</td><td>{p.sku}</td><td>{q} {p.unit}</td><td>{(data.valuation.find(v=>v.productId===p.id&&v.branchId===branchId)?.averageUnitCost??p.buyingPrice).toFixed(2)}</td><td>{(data.valuation.find(v=>v.productId===p.id&&v.branchId===branchId)?.stockValue??q*p.buyingPrice).toFixed(2)}</td><td>{l?.minimumQuantity??'—'}</td><td>{l?.maximumQuantity??'—'}</td><td>{l&&q<l.minimumQuantity?'LOW STOCK':'OK'}</td></tr>;})}</tbody></table></div>
   </section>
   {alerts.length>0&&<section className="content-card"><h3>Reorder alerts</h3><div className="table-wrap"><table><thead><tr><th>Product</th><th>Branch</th><th>On hand</th><th>Minimum</th><th>Suggested top-up</th></tr></thead><tbody>{alerts.map((a,i)=><tr key={i}><td>{a.product?.name}</td><td>{a.branch?.name}</td><td>{a.quantity}</td><td>{a.minimumQuantity}</td><td>{a.maximumQuantity!==null?Math.max(0,a.maximumQuantity-a.quantity):Math.max(0,a.minimumQuantity-a.quantity)}</td></tr>)}</tbody></table></div></section>}
   {canManage&&<div className="inventory-forms">
