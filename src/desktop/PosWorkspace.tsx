@@ -14,6 +14,7 @@ type ReturnLine=SaleItem&{returnQuantity:number;restock:boolean};
 type Reconciliation = { openingFloat:number;cashSales:number;mpesaSales:number;expectedCash:number;closingCash:number;closingMpesa:number;cashVariance:number;mpesaVariance:number };
 type Workspace = { role: string; assignedBranchId: string | null; branches: Branch[]; products: Product[]; stock: Stock[]; customers: Customer[]; openShift: Shift | null };
 
+const roundMoney=(value:number)=>Math.round((value+Number.EPSILON)*100)/100;
 const money = (value:number) => new Intl.NumberFormat('en-KE',{style:'currency',currency:'KES',maximumFractionDigits:2}).format(value || 0);
 
 export default function PosWorkspace({ session, onSignOut }: { session: Session; onSignOut: () => void }) {
@@ -63,15 +64,15 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
 
   const shift=workspace?.openShift&&workspace.openShift.branchId===branchId?workspace.openShift:null;
   const products=useMemo(()=> (workspace?.products||[]).filter(p=>(p.name+' '+p.sku).toLowerCase().includes(search.toLowerCase())),[workspace,search]);
-  const subtotal=basket.reduce((sum,line)=>sum+line.quantity*line.unitPrice,0);
-  const afterLineDiscounts=basket.reduce((sum,line)=>sum+line.quantity*line.unitPrice*(1-line.discountPercent/100),0);
-  const lineDiscountTotal=subtotal-afterLineDiscounts;
-  const orderDiscountAmount=afterLineDiscounts*(Math.max(0,Math.min(100,Number(orderDiscountPercent)||0))/100);
-  const discountTotal=lineDiscountTotal+orderDiscountAmount;
-  const total=Math.max(0,subtotal-discountTotal);
+  const subtotal=roundMoney(basket.reduce((sum,line)=>sum+roundMoney(line.quantity*line.unitPrice),0));
+  const afterLineDiscounts=roundMoney(basket.reduce((sum,line)=>sum+roundMoney(roundMoney(line.quantity*line.unitPrice)*(1-line.discountPercent/100)),0));
+  const lineDiscountTotal=roundMoney(subtotal-afterLineDiscounts);
+  const orderDiscountAmount=roundMoney(afterLineDiscounts*(Math.max(0,Math.min(100,Number(orderDiscountPercent)||0))/100));
+  const discountTotal=roundMoney(lineDiscountTotal+orderDiscountAmount);
+  const total=Math.max(0,roundMoney(subtotal-discountTotal));
   const hasDiscount=discountTotal>0.005;
   const requiresManagerApproval=hasDiscount&&!['Business Owner','Manager'].includes(session.role);
-  const returnTotal=returnLines.reduce((sum,line)=>sum+(line.returnQuantity>0?(line.netLineTotal/line.quantity)*line.returnQuantity:0),0);
+  const returnTotal=roundMoney(returnLines.reduce((sum,line)=>sum+(line.returnQuantity>0?roundMoney((line.netLineTotal/line.quantity)*line.returnQuantity):0),0));
   const returnPaid=Number(returnCash||0)+Number(returnMpesa||0);
   const requiresReturnApproval=!['Business Owner','Manager'].includes(session.role);
   const paid=Number(cashAmount||0)+Number(mpesaAmount||0);
@@ -165,7 +166,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
         <section className="content-card"><div className="section-heading"><div><h3>Products</h3><p>{workspace.products.length} active products · stock at selected branch</p></div></div><input className="pos-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search product name or SKU"/><div className="pos-product-list">{products.map(p=><button type="button" className="pos-product" key={p.id} onClick={()=>add(p)} disabled={!shift||available(p.id)<=0}><span><strong>{p.name}</strong><small>{p.sku} · {available(p.id)} {p.unit} in stock</small></span><b>{money(p.sellingPrice)}</b></button>)}</div></section>
         <section className="content-card"><div className="section-heading"><div><h3>Current sale</h3><p>{basket.length} line(s)</p></div></div>
           {!basket.length?<div className="empty-state">Select products to add them to this sale.</div>:<div className="basket-list">{basket.map(line=>{const p=workspace.products.find(x=>x.id===line.productId);if(!p)return null;return <div className="basket-line" key={line.productId}><strong>{p.name}</strong><div className="pos-two"><label>Quantity<input type="number" min="0.001" step="0.001" max={available(p.id)} value={line.quantity} onChange={e=>update(p.id,{quantity:Number(e.target.value)})}/></label><label>Unit price<input type="text" value={money(line.unitPrice)} readOnly/></label></div><label>Discount (%)<input type="number" min="0" max="100" step="0.1" value={line.discountPercent} onChange={e=>update(p.id,{discountPercent:Math.max(0,Math.min(100,Number(e.target.value)||0))})}/></label><div className="ledger-row"><span>Line discount</span><strong>{money(line.quantity*line.unitPrice*line.discountPercent/100)}</strong></div><div className="ledger-row"><span>Line total after discount</span><strong>{money(line.quantity*line.unitPrice*(1-line.discountPercent/100))}</strong></div><button type="button" className="text-button" onClick={()=>setBasket(rows=>rows.filter(x=>x.productId!==p.id))}>Remove</button></div>;})}</div>}
-          <div className="discount-panel"><div className="ledger-row"><span>Subtotal</span><strong>{money(subtotal)}</strong></div><label>Whole-sale discount (%)<input type="number" min="0" max="100" step="0.1" value={orderDiscountPercent} onChange={e=>setOrderDiscountPercent(e.target.value)}/></label><div className="ledger-row"><span>Total discount</span><strong>{money(discountTotal)}</strong></div><div className="pos-total"><span>Amount payable</span><strong>{money(total)}</strong></div></div>
+          <div className="discount-panel"><div className="ledger-row"><span>Subtotal</span><strong>{money(subtotal)}</strong></div><label>Whole-sale discount (%)<input type="number" min="0" max="100" step="0.1" value={orderDiscountPercent} onChange={e=>setOrderDiscountPercent(String(Math.max(0,Math.min(100,Number(e.target.value)||0))))}/></label><div className="ledger-row"><span>Total discount</span><strong>{money(discountTotal)}</strong></div><div className="pos-total"><span>Amount payable</span><strong>{money(total)}</strong></div></div>
           {hasDiscount&&requiresManagerApproval&&<div className="approval-panel"><strong>Manager approval required</strong><p className="muted">A Manager or Business Owner must authorise this discount. Approval is recorded against the sale.</p><div className="pos-two"><label>Approver username<input value={approverUsername} onChange={e=>setApproverUsername(e.target.value)} autoComplete="off"/></label><label>Approver password<input type="password" value={approverPassword} onChange={e=>setApproverPassword(e.target.value)} autoComplete="off"/></label></div></div>}
 
           <label>Saved customer (optional)<select value={customerId} onChange={e=>{const c=workspace.customers.find(x=>x.id===e.target.value);setCustomerId(e.target.value);setCustomerName(c?.name||'');setCustomerPhone(c?.phone||'');}}><option value="">Walk-in / enter customer details</option>{workspace.customers.map(c=><option key={c.id} value={c.id}>{c.name} · {c.phone}</option>)}</select></label>
