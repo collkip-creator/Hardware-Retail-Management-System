@@ -2437,6 +2437,24 @@ mod tests {
     }
 
     #[test]
+    fn branch_access_rejects_cross_business_branch_ids() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_schema(&connection).expect("schema should initialise");
+        connection.execute("INSERT INTO businesses(id,name) VALUES('business-a','Business A'),('business-b','Business B')", [])
+            .expect("businesses should insert");
+        connection.execute("INSERT INTO branches(id,business_id,name) VALUES('branch-a','business-a','Branch A'),('branch-b','business-b','Branch B')", [])
+            .expect("branches should insert");
+        connection.execute(
+            "INSERT INTO staff_profiles(id,business_id,display_name,role,branch_id) VALUES('owner-a','business-a','Owner A','Business Owner',NULL)",
+            [],
+        ).expect("staff profile should insert");
+
+        assert!(ensure_branch_access(&connection, "owner-a", "branch-a").is_ok());
+        assert!(ensure_branch_access(&connection, "owner-a", "branch-b").is_err());
+        assert!(ensure_branch_belongs_to_actor_business(&connection, "owner-a", "branch-b").is_err());
+    }
+
+    #[test]
     fn password_hash_is_salted_and_verifiable() {
         let hash = hash_password("a-long-test-password").expect("hash should be generated");
         assert_ne!(hash, "a-long-test-password");
