@@ -2166,6 +2166,166 @@ fn record_supplier_payment(database:tauri::State<'_,LocalDatabase>,actor_staff_i
     Ok(serde_json::json!({"purchaseId":purchase_id,"paidAmount":next_paid,"outstanding":(total-next_paid).max(0.0),"paymentStatus":pay_status,"orderStatus":status}))
 }
 
+
+
+#[tauri::command]
+fn get_management_reports(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+    start_date: String,
+    end_date: String,
+    branch_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let start = start_date.trim();
+    let end = end_date.trim();
+    let valid_date = |v: &str| v.len() == 10 && v.chars().enumerate().all(|(i,c)| {
+        if [4,7].contains(&i) { c == '-' } else { c.is_ascii_digit() }
+    });
+    if !valid_date(start) || !valid_date(end) || start > end {
+        return Err("Choose a valid date range (start date must not be after end date).".into());
+    }
+    let c = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let (role, assigned, business) = procurement_actor(
+        &c, &actor_staff_id, &["Business Owner", "Manager", "Accountant"]
+    )?;
+    if let (Some(allowed), Some(requested)) = (assigned.as_deref(), branch_id.as_deref()) {
+        if allowed != requested {
+            return Err("You can only view reports for your assigned branch.".into());
+        }
+    }
+    let selected = branch_id.or(assigned);
+    if let Some(ref bid) = selected {
+        let exists: i64 = c.query_row(
+            "SELECT COUNT(*) FROM branches WHERE id=?1 AND business_id=?2 AND status='active'",
+            rusqlite::params![bid, business], |r| r.get(0)
+        ).map_err(|e| e.to_string())?;
+        if exists == 0 { return Err("The selected branch is unavailable.".into()); }
+    }
+
+    let sales: (i64, f64, f64, f64) = c.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(s.total),0),COALESCE(SUM(s.discount_amount),0),COALESCE(AVG(s.total),0)
+         FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
+         AND date(s.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR s.branch_id=?3)",
+        rusqlite::params![start,end,selected.as_deref()],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+    ).map_err(|e| e.to_string())?;
+    let refunds: f64 = c.query_row(
+        "SELECT COALESCE(SUM(refund_total),0) FROM sale_returns
+         WHERE status='COMPLETED' AND date(created_at) BETWEEN ?1 AND ?2
+         AND (?3 IS NULL OR branch_id=?3)",
+        rusqlite::params![start,end,selected.as_deref()], |r| r.get(0)
+    ).map_err(|e| e.to_string())?;
+    let net_sales = (sales.1 - refunds).max(0.0);
+    let return_count: i64 = c.query_row(
+        "SELECT COUNT(*) FROM sale_returns WHERE status='COMPLETED' AND date(created_at) BETWEEN ?1 AND ?2
+         AND (?3 IS NULL OR branch_id=?3)",
+        rusqlite::params![start,end,selected.as_deref()], |r| r.get(0)
+    ).map_err(|e| e.to_string())?;
+
+    let mut daily_stmt = c.prepare(
+        "SELECT date(s.created_at),COUNT(*),COALESCE(SUM(s.total),0),
+         COALESCE((SELECT SUM(r.refund_total) FROM sale_returns r WHERE r.status='COMPLETED'
+          AND date(r.created_at)=date(s.created_at) AND r.branch_id=s.branch_id),0)
+         FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
+         AND date(s.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR s.branch_id=?3)
+         GROUP BY date(s.created_at) ORDER BY date(s.created_at)"
+    ).map_err(|e| e.to_string())?;
+    let daily = daily_stmt.query_map(rusqlite::params![start,end,selected.as_deref()], |r| {
+        let gross: f64 = r.get(2)?; let refund: f64 = r.get(3)?;
+        Ok(serde_json::json!({"date":r.get::<_,String>(0)?,"transactions":r.get::<_,i64>(1)?,"sales":gross,"refunds":refund,"netSales":(gross-refund).max(0.0)}))
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+
+    let mut payment_stmt = c.prepare(
+        "SELECT s.payment_method,COUNT(*),COALESCE(SUM(s.total),0)
+         FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
+         AND date(s.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR s.branch_id=?3)
+         GROUP BY s.payment_method ORDER BY SUM(s.total) DESC"
+    ).map_err(|e| e.to_string())?;
+    let payments = payment_stmt.query_map(rusqlite::params![start,end,selected.as_deref()], |r| {
+        Ok(serde_json::json!({"method":r.get::<_,String>(0)?,"transactions":r.get::<_,i64>(1)?,"amount":r.get::<_,f64>(2)?}))
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+
+    let mut product_stmt = c.prepare(
+        "SELECT si.product_id,si.product_name,COALESCE(SUM(si.quantity),0),
+         COALESCE(SUM(si.net_line_total),SUM(si.line_total)),COALESCE(SUM(si.quantity*si.unit_cost),0),
+         COALESCE((SELECT SUM(ri.quantity) FROM sale_return_items ri JOIN sale_returns rr ON rr.id=ri.return_id
+          JOIN sales rs ON rs.id=rr.sale_id WHERE ri.sale_item_id IN
+          (SELECT sx.id FROM sale_items sx JOIN sales ss ON ss.id=sx.sale_id WHERE sx.product_id=si.product_id
+           AND date(ss.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR ss.branch_id=?3))
+          AND rr.status='COMPLETED' AND date(rr.created_at) BETWEEN ?1 AND ?2),0)
+         FROM sale_items si JOIN sales s ON s.id=si.sale_id
+         WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
+         AND date(s.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR s.branch_id=?3)
+         GROUP BY si.product_id,si.product_name ORDER BY SUM(si.net_line_total) DESC LIMIT 10"
+    ).map_err(|e| e.to_string())?;
+    let top_products = product_stmt.query_map(rusqlite::params![start,end,selected.as_deref()], |r| {
+        Ok(serde_json::json!({"productId":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"quantity":r.get::<_,f64>(2)?,"revenue":r.get::<_,f64>(3)?,"cost":r.get::<_,f64>(4)?,"returnedQuantity":r.get::<_,f64>(5)?}))
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+
+    let purchases: (i64,f64,f64) = c.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(total),0),COALESCE(SUM(MAX(total-paid_amount,0)),0)
+         FROM purchase_orders WHERE date(created_at) BETWEEN ?1 AND ?2
+         AND (?3 IS NULL OR branch_id=?3) AND status NOT IN ('CANCELLED','VOID')",
+        rusqlite::params![start,end,selected.as_deref()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))
+    ).map_err(|e| e.to_string())?;
+
+    let (product_count, stock_units, stock_value, low_stock): (i64,f64,f64,i64) = c.query_row(
+        "SELECT COUNT(DISTINCT p.id),COALESCE(SUM(x.qty),0),COALESCE(SUM(x.qty*x.unit_cost),0),
+         COALESCE(SUM(CASE WHEN rl.minimum_quantity IS NOT NULL AND x.qty<=rl.minimum_quantity THEN 1 ELSE 0 END),0)
+         FROM products p JOIN branches b ON b.business_id=p.business_id AND b.status='active'
+         LEFT JOIN branch_reorder_levels rl ON rl.product_id=p.id AND rl.branch_id=b.id
+         LEFT JOIN (SELECT product_id,branch_id,SUM(quantity_delta) qty,
+          CASE WHEN SUM(CASE WHEN quantity_delta>0 AND unit_cost>0 THEN quantity_delta ELSE 0 END)>0
+          THEN SUM(CASE WHEN quantity_delta>0 AND unit_cost>0 THEN total_cost ELSE 0 END)/
+          SUM(CASE WHEN quantity_delta>0 AND unit_cost>0 THEN quantity_delta ELSE 0 END) ELSE 0 END unit_cost
+          FROM stock_movements GROUP BY product_id,branch_id) x ON x.product_id=p.id AND x.branch_id=b.id
+         WHERE p.business_id=?1 AND p.status='active' AND (?2 IS NULL OR b.id=?2)",
+        rusqlite::params![business,selected.as_deref()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+    ).map_err(|e| e.to_string())?;
+
+    let (income, expense): (f64,f64) = c.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN a.account_type='INCOME' THEN jl.credit-jl.debit
+          WHEN a.account_type='EXPENSE' THEN 0 ELSE 0 END),0),
+         COALESCE(SUM(CASE WHEN a.account_type='EXPENSE' THEN jl.debit-jl.credit
+          WHEN a.account_type='INCOME' THEN 0 ELSE 0 END),0)
+         FROM journal_lines jl JOIN journal_entries je ON je.id=jl.journal_id
+         JOIN accounting_accounts a ON a.business_id=je.business_id AND a.code=jl.account_code
+         WHERE je.business_id=?1 AND je.status='POSTED' AND je.entry_date BETWEEN ?2 AND ?3",
+        rusqlite::params![business,start,end], |r| Ok((r.get(0)?,r.get(1)?))
+    ).map_err(|e| e.to_string())?;
+
+    let mut branch_stmt = c.prepare(
+        "SELECT b.id,b.name,COUNT(s.id),COALESCE(SUM(s.total),0)
+         FROM branches b LEFT JOIN sales s ON s.branch_id=b.id AND date(s.created_at) BETWEEN ?1 AND ?2
+          AND s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
+         WHERE b.business_id=?3 AND b.status='active' AND (?4 IS NULL OR b.id=?4)
+         GROUP BY b.id,b.name ORDER BY SUM(s.total) DESC"
+    ).map_err(|e| e.to_string())?;
+    let branch_summary = branch_stmt.query_map(rusqlite::params![start,end,business,selected.as_deref()], |r| {
+        Ok(serde_json::json!({"branchId":r.get::<_,String>(0)?,"branch":r.get::<_,String>(1)?,"transactions":r.get::<_,i64>(2)?,"sales":r.get::<_,f64>(3)?}))
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+
+    let branches_stmt = c.prepare(
+        "SELECT id,name FROM branches WHERE business_id=?1 AND status='active' AND (?2 IS NULL OR id=?2) ORDER BY name"
+    ).map_err(|e| e.to_string())?;
+    let branches = branches_stmt.query_map(rusqlite::params![business,selected.as_deref()], |r| {
+        Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?}))
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "role":role,"startDate":start,"endDate":end,"selectedBranchId":selected,
+        "branches":branches,
+        "summary":{"transactions":sales.0,"grossSales":sales.1,"discounts":sales.2,"refunds":refunds,
+          "netSales":net_sales,"averageSale":sales.3,"returns":return_count,
+          "purchaseOrders":purchases.0,"purchases":purchases.1,"payables":purchases.2,
+          "products":product_count,"stockUnits":stock_units,"stockValue":stock_value,
+          "lowStock":low_stock,"accountingIncome":income,"accountingExpenses":expense,
+          "accountingNet":income-expense},
+        "dailySales":daily,"paymentMethods":payments,"topProducts":top_products,
+        "branchSummary":branch_summary
+    }))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -2215,6 +2375,7 @@ pub fn run() {
             process_pos_return,
             close_pos_shift,
             get_pos_sales_history,
+            get_management_reports,
             get_accounting_workspace,
             save_accounting_expense,
             save_accounting_cashbook,
