@@ -356,3 +356,36 @@ td { color:#3d4d42; }
 .catalogue-product-tile {
   text-align: left;
 }
+
+
+/* POS discounts, approval and returns */
+.discount-panel,
+.approval-panel,
+.return-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  margin: 12px 0;
+  border: 1px solid var(--border, #d9dee7);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+}
+.approval-panel {
+  border-color: var(--warning-border, #d9a441);
+  background: var(--warning-surface, #fffaf0);
+}
+.return-panel { margin-top: 18px; }
+.return-line {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border, #d9dee7);
+}
+.return-line > div:first-child { display: grid; gap: 4px; }
+.return-line small { color: var(--muted, #687385); }
+.check-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.check-label input { width: auto; }
