@@ -1274,7 +1274,7 @@ fn receive_pos_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Stri
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let role:Option<String>=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     if !matches!(role.as_deref(),Some("Business Owner")|Some("Storekeeper")){return Err("Only the Business Owner or Storekeeper can receive stock.".into());}ensure_branch_access(&c,&actor_staff_id,&branch_id)?;ensure_branch_not_in_stocktake(&c,&branch_id)?;
-    let valid:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active' AND business_id=(SELECT business_id FROM branches WHERE id=?2)",params![product_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     let branch:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if valid==0||branch==0{return Err("Select a valid product and active branch.".into());}
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
@@ -1292,8 +1292,7 @@ fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,
     let (role,assigned)=role.ok_or_else(||"Staff account is inactive.".to_string())?;
     if !["Business Owner","Manager","Cashier","Supervisor"].contains(&role.as_str()){return Err("Your role is not permitted to operate the POS.".into());}
     if assigned.as_deref().is_some_and(|id|id!=branch_id){return Err("You can only open a shift at your assigned branch.".into());}
-    let exists:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id=?1 AND status='active'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if exists==0{return Err("Select an active branch.".into());}
+    ensure_branch_access(&c,&actor_staff_id,&branch_id)?;
     let open:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE cashier_staff_id=?1 AND status='OPEN'",[&actor_staff_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if open>0{return Err("You already have an open cashier shift.".into());}
     let id=Uuid::new_v4().to_string();
@@ -1327,12 +1326,12 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     for item in &items{
         let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;let pct=item["discountPercent"].as_f64().unwrap_or(0.0);
         if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}if !pct.is_finite()||!(0.0..=100.0).contains(&pct){return Err("Each product discount must be between 0% and 100%.".into());}
-        let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
+        let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active' AND business_id=(SELECT business_id FROM branches WHERE id=?2)",params![pid,branch_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active for this business.".to_string())?;
         let stock:f64=tx.query_row("SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
         let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
         let gross=(qty*product.2*100.0).round()/100.0;let line_discount=(gross*pct/100.0*100.0).round()/100.0;let eligible=(gross-line_discount).max(0.0);
         subtotal+=gross;eligible_total+=eligible;
-        let unit_cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND movement_type='RECEIPT'",params![pid,branch_id,product.3],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let unit_cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity_delta),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND quantity_delta>0 AND unit_cost>0",params![pid,branch_id,product.3],|r|r.get(0)).map_err(|e|e.to_string())?;
         lines.push(serde_json::json!({"productId":pid,"name":product.0,"quantity":qty,"unitPrice":product.2,"unitCost":unit_cost,"grossTotal":gross,"lineDiscount":line_discount,"eligibleTotal":eligible,"lineDiscountPercent":pct}));
     }
     subtotal=(subtotal*100.0).round()/100.0;eligible_total=(eligible_total*100.0).round()/100.0;
@@ -1588,9 +1587,18 @@ fn inventory_actor_role(c: &Connection, actor_id: &str, allowed: &[&str]) -> Res
 }
 
 fn ensure_branch_access(c:&Connection,actor_id:&str,branch_id:&str)->Result<(),String>{
-    let record:Option<(String,Option<String>)>=c.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[actor_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
-    let (role,assigned)=record.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
+    let record:Option<(String,Option<String>,String)>=c.query_row("SELECT role,branch_id,business_id FROM staff_profiles WHERE id=?1 AND status='active'",[actor_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?;
+    let (role,assigned,actor_business)=record.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
+    let branch_business:Option<String>=c.query_row("SELECT business_id FROM branches WHERE id=?1 AND status='active'",[branch_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if branch_business.as_deref()!=Some(actor_business.as_str()){return Err("The selected branch is unavailable for your business.".into());}
     if role!="Business Owner" && assigned.as_deref().is_some_and(|b|b!=branch_id){return Err("You can only manage inventory at your assigned branch.".into());}
+    Ok(())
+}
+fn ensure_branch_belongs_to_actor_business(c:&Connection,actor_id:&str,branch_id:&str)->Result<(),String>{
+    let actor_business:Option<String>=c.query_row("SELECT business_id FROM staff_profiles WHERE id=?1 AND status='active'",[actor_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    let actor_business=actor_business.ok_or_else(||"Your staff account is inactive or unavailable.".to_string())?;
+    let branch_business:Option<String>=c.query_row("SELECT business_id FROM branches WHERE id=?1 AND status='active'",[branch_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if branch_business.as_deref()!=Some(actor_business.as_str()){return Err("The selected branch is unavailable for your business.".into());}
     Ok(())
 }
 fn ensure_branch_not_in_stocktake(c:&Connection,branch_id:&str)->Result<(),String>{
@@ -1660,8 +1668,8 @@ fn adjust_inventory_stock(database:tauri::State<'_,LocalDatabase>,actor_staff_id
     ensure_branch_access(&c,&actor_staff_id,&branch_id)?;ensure_branch_not_in_stocktake(&c,&branch_id)?;
     let current=local_stock_balance(&c,&product_id,&branch_id)?;
     if current+quantity_delta < -0.000001{return Err(format!("This adjustment would make stock negative. Available: {current}"));}
-    let exists:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active'",[&product_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if exists==0{return Err("Select an active product.".into());}
+    let exists:i64=c.query_row("SELECT COUNT(*) FROM products WHERE id=?1 AND status='active' AND business_id=(SELECT business_id FROM branches WHERE id=?2)",params![product_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if exists==0{return Err("Select an active product for this business and branch.".into());}
     let id=Uuid::new_v4().to_string();let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'ADJUSTMENT',?4,?5,0,0,?6,?7)",params![id,product_id,branch_id,quantity_delta.abs(),quantity_delta,reason,actor_staff_id]).map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'STOCK_ADJUSTED','stock_movement',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"productId":product_id,"branchId":branch_id,"delta":quantity_delta,"reason":reason,"balanceAfter":current+quantity_delta}).to_string()]).map_err(|e|e.to_string())?;
@@ -1676,8 +1684,9 @@ fn create_stock_transfer(database:tauri::State<'_,LocalDatabase>,actor_staff_id:
     ensure_branch_access(&c,&actor_staff_id,&from_branch_id)?;ensure_branch_not_in_stocktake(&c,&from_branch_id)?;
     let mut clean:Vec<(String,f64)>=Vec::new();
     for item in &items{let pid=item["productId"].as_str().ok_or_else(||"A transfer line is missing its product.".to_string())?.to_string();let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid transfer quantity.".to_string())?;if !qty.is_finite()||qty<=0.0{return Err("Transfer quantities must be greater than zero.".into());}if clean.iter().any(|x|x.0==pid){return Err("A product can only appear once in a transfer.".into());}let balance=local_stock_balance(&c,&pid,&from_branch_id)?;if qty>balance+0.000001{return Err(format!("Insufficient stock for transfer. Available: {balance}"));}clean.push((pid,qty));}
-    let valid:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id IN (?1,?2) AND status='active'",params![from_branch_id,to_branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if valid!=2{return Err("Both transfer branches must be active.".into());}
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM branches WHERE id IN (?1,?2) AND business_id=(SELECT business_id FROM branches WHERE id=?1) AND status='active'",params![from_branch_id,to_branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if valid!=2{return Err("Both transfer branches must belong to the same active business.".into());}
+    ensure_branch_belongs_to_actor_business(&c,&actor_staff_id,&to_branch_id)?;
     let id=Uuid::new_v4().to_string();let number=format!("TR-{}",Uuid::new_v4().simple().to_string().chars().take(10).collect::<String>().to_uppercase());
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO stock_transfers(id,transfer_number,from_branch_id,to_branch_id,notes,created_by) VALUES(?1,?2,?3,?4,?5,?6)",params![id,number,from_branch_id,to_branch_id,notes,actor_staff_id]).map_err(|e|e.to_string())?;
@@ -1725,8 +1734,8 @@ fn create_stocktake(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let open:i64=c.query_row("SELECT COUNT(*) FROM stocktake_sessions WHERE branch_id=?1 AND status='OPEN'",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;if open>0{return Err("An open stocktake already exists for this branch.".into());}
     let id=Uuid::new_v4().to_string();let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO stocktake_sessions(id,branch_id,created_by,notes) VALUES(?1,?2,?3,?4)",params![id,branch_id,actor_staff_id,notes]).map_err(|e|e.to_string())?;
-    let mut stmt=tx.prepare("SELECT id FROM products WHERE status='active'").map_err(|e|e.to_string())?;
-    let ids=stmt.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
+    let mut stmt=tx.prepare("SELECT id FROM products WHERE status='active' AND business_id=(SELECT business_id FROM branches WHERE id=?1)").map_err(|e|e.to_string())?;
+    let ids=stmt.query_map([&branch_id],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
     for pid in ids{let q=local_stock_balance(&tx,&pid,&branch_id)?;tx.execute("INSERT INTO stocktake_items(id,session_id,product_id,system_quantity) VALUES(?1,?2,?3,?4)",params![Uuid::new_v4().to_string(),id,pid,q]).map_err(|e|e.to_string())?;}
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'STOCKTAKE_CREATED','stocktake',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;Ok(id)
