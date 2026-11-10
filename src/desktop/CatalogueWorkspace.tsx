@@ -5,16 +5,35 @@ type Product={id:string;name:string;sku:string;unit:string;buyingPrice:number;se
 type Branch={id:string;name:string;code?:string|null};
 type Warehouse={id:string;branchId:string;name:string};
 type Receipt={id:string;productName:string;branchName:string;quantity:number;unitCost:number;totalCost:number;reference?:string|null;createdAt:string};
+type MasterProduct={id:string;category:string;productFamily?:string|null;name:string;specification?:string|null;brand?:string|null;sku:string;barcode?:string|null;stockUnit:string;purchaseUnit?:string|null;conversionFactor:number;description?:string|null};
+type MasterData={release:{id:string;version:number;status:string;itemCount:number;publishedAt?:string|null;syncedAt?:string|null}|null;items:MasterProduct[];syncedAt?:string|null};
 type Data={role:string;assignedBranchId:string|null;branches:Branch[];products:Product[];stock:{productId:string;branchId:string;quantity:number}[];receipts:Receipt[];warehouses:Warehouse[]};
 const CATEGORIES=['All categories','Cement & masonry','Steel & metal','Roofing','Plumbing','Electrical','Timber & boards','Paint & finishes','Fasteners & fittings','Tools & equipment','Safety & protective wear','Doors & household','Agriculture & irrigation','General supplies'];
 const UNITS=['Piece','Bag','Kilogram','Gram','Tonne','Metre','Foot','Roll','Sheet','Length','Litre','Millilitre','Box','Packet','Pair','Set','Dozen'];
 const blank=()=>({name:'',sku:'',unit:'Piece',buyingPrice:'0',sellingPrice:'0',category:'General supplies',brand:'',variant:'',purchaseUnit:'Piece',conversionFactor:'1',barcode:'',reorderLevel:'0',taxCategory:'STANDARD'});
 export default function CatalogueWorkspace({session}:{session:{staffId:string;role:string;branchId:string|null}}){
  const [data,setData]=useState<Data|null>(null),[search,setSearch]=useState(''),[category,setCategory]=useState('All categories'),[selected,setSelected]=useState(''),[form,setForm]=useState(blank()),[editing,setEditing]=useState(false);
+ const [view,setView]=useState<'business'|'master'>('business'),[master,setMaster]=useState<MasterData|null>(null),[masterSearch,setMasterSearch]=useState(''),[masterCategory,setMasterCategory]=useState('All categories'),[masterSelected,setMasterSelected]=useState<string[]>([]),[masterBusy,setMasterBusy]=useState(false),[online,setOnline]=useState(navigator.onLine);
  const [branch,setBranch]=useState(session.branchId||''),[warehouse,setWarehouse]=useState(''),[qty,setQty]=useState(''),[cost,setCost]=useState(''),[reference,setReference]=useState(''),[note,setNote]=useState('');
  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
  async function load(){const d=await invoke<Data>('get_catalogue_workspace',{actorStaffId:session.staffId});setData(d);setBranch(v=>v||d.assignedBranchId||d.branches[0]?.id||'');}
- useEffect(()=>{load().catch(e=>setError(String(e)));},[session.staffId]);
+ async function loadMaster(){const d=await invoke<MasterData>('get_master_catalogue_workspace',{actorStaffId:session.staffId});setMaster(d);}
+ async function syncMaster(){
+  setMasterBusy(true);setError('');setNotice('');
+  try{const result=await invoke<{version:number;itemCount:number}>('sync_master_catalogue');await loadMaster();setNotice('Central catalogue v'+result.version+' downloaded: '+result.itemCount+' products are now available offline.');}
+  catch(e){setError(String(e).replace(/^Error: /,''));}
+  finally{setMasterBusy(false);}
+ }
+ async function adoptMaster(){
+  if(!masterSelected.length)return;
+  setMasterBusy(true);setError('');setNotice('');
+  try{const result=await invoke<{added:number;skipped:number;version:number}>('adopt_master_catalogue_products',{actorStaffId:session.staffId,masterProductIds:masterSelected});setMasterSelected([]);await load();await loadMaster();setView('business');setNotice(result.added+' products added to your business catalogue; '+result.skipped+' skipped because they already exist. Central release v'+result.version+'. Prices and stock remain unconfigured.');}
+  catch(e){setError(String(e).replace(/^Error: /,''));}
+  finally{setMasterBusy(false);}
+ }
+ useEffect(()=>{load().catch(e=>setError(String(e)));loadMaster().catch(e=>setError(String(e)));const onOnline=()=>setOnline(true),onOffline=()=>setOnline(false);window.addEventListener('online',onOnline);window.addEventListener('offline',onOffline);return()=>{window.removeEventListener('online',onOnline);window.removeEventListener('offline',onOffline);};},[session.staffId]);
+ useEffect(()=>{if(!online)return;let cancelled=false;(async()=>{try{const status=await invoke<{paired:boolean}>('get_device_sync_status');if(status.paired&&!cancelled){await invoke('sync_master_catalogue');if(!cancelled)await loadMaster();}}catch{/* Keep the last successful local catalogue available offline. */}})();return()=>{cancelled=true;};},[online,session.staffId]);
+ const masterProducts=useMemo(()=>master?.items.filter(p=>(masterCategory==='All categories'||p.category===masterCategory)&&[p.name,p.sku,p.brand||'',p.specification||'',p.productFamily||'',p.barcode||''].join(' ').toLowerCase().includes(masterSearch.toLowerCase()))||[],[master,masterCategory,masterSearch]);
  const products=useMemo(()=>data?.products.filter(p=>(category==='All categories'||p.category===category)&&[p.name,p.sku,p.brand||'',p.variant||'',p.barcode||''].join(' ').toLowerCase().includes(search.toLowerCase()))||[],[data,category,search]);
  const product=data?.products.find(p=>p.id===selected);
  const stock=(id:string)=>data?.stock.find(s=>s.productId===id&&s.branchId===branch)?.quantity||0;
@@ -25,6 +44,18 @@ export default function CatalogueWorkspace({session}:{session:{staffId:string;ro
  async function receive(e:FormEvent){e.preventDefault();if(!selected) return;await act(async()=>{await invoke('receive_catalogue_stock',{actorStaffId:session.staffId,productId:selected,branchId:branch,warehouseId:warehouse||null,quantity:Number(qty),unitCost:Number(cost),reference:reference||null,note:note||null});setQty('');setCost('');setReference('');setNote('');},'Stock receipt recorded and audited locally.');}
  if(!data)return <section className="content-card"><p>Loading product catalogue…</p>{error&&<p className="error">{error}</p>}</section>;
  return <div className="catalogue-workspace">
+  <div className="catalogue-view-switch"><button type="button" className={view==='business'?'primary':'secondary'} onClick={()=>setView('business')}>My business catalogue</button><button type="button" className={view==='master'?'primary':'secondary'} onClick={()=>setView('master')}>Central master catalogue</button></div>
+  {view==='master'?<>
+   <div className="catalogue-heading"><div><span className="eyebrow">CENTRAL PRODUCT LIBRARY</span><h2>Master product catalogue</h2><p className="muted">Download published product lists and add selected items to your business catalogue. Prices and stock are always set by your business.</p></div><button className="primary" onClick={syncMaster} disabled={!online||masterBusy}>{masterBusy?'Working…':'↻ Sync catalogue'}</button></div>
+   {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
+   <section className="content-card catalogue-browser">
+    <div className="section-heading"><div><h3>{master?.release?'Release v'+master.release.version:'No catalogue downloaded yet'}</h3><p>{master?.release?master.items.length+' products cached on this computer · '+(online?'Internet available':'Offline mode'):'Connect to the internet and sync to download the first release.'}</p></div><button className="primary" onClick={adoptMaster} disabled={masterBusy||masterSelected.length===0}>Add {masterSelected.length||''} selected to my catalogue</button></div>
+    <div className="catalogue-tools"><input value={masterSearch} onChange={e=>setMasterSearch(e.target.value)} placeholder="Search central products, SKU, brand or specification…"/><select value={masterCategory} onChange={e=>setMasterCategory(e.target.value)}>{CATEGORIES.map(x=><option key={x}>{x}</option>)}</select></div>
+    <div className="catalogue-count">{masterProducts.length} matching products · {master?.items.length||0} cached products · {master?.syncedAt?'Last sync '+master.syncedAt:'Not yet synced'}</div>
+    <div className="catalogue-product-grid">{masterProducts.map(p=><button type="button" key={p.id} className={'catalogue-product-tile'+(masterSelected.includes(p.id)?' selected':'')} onClick={()=>setMasterSelected(current=>current.includes(p.id)?current.filter(id=>id!==p.id):[...current,p.id])}><span className="catalogue-product-category">{p.category}</span><strong>{p.name}</strong><small>{[p.brand,p.specification].filter(Boolean).join(' · ')||p.productFamily||p.sku}</small><span className="catalogue-product-bottom"><b>{p.sku}</b><small>{p.stockUnit}{p.purchaseUnit&&p.purchaseUnit!==p.stockUnit?' · bought by '+p.purchaseUnit:''}</small></span><small>{masterSelected.includes(p.id)?'✓ Selected':'Select product'}</small></button>)}</div>
+    {masterProducts.length===0&&<div className="empty-state">{master?.items.length?'No central products match this search.':'No central catalogue is cached. Sync while online to download it.'}</div>}
+   </section>
+  </>:<>
   <div className="catalogue-heading"><div><span className="eyebrow">PRODUCTS & STOCK</span><h2>Product catalogue</h2><p className="muted">Browse the full catalogue, select an item and receive stock into a branch or warehouse.</p></div><button className="primary" onClick={()=>edit()}>+ Add new product</button></div>
   {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
   <section className="content-card catalogue-browser"><div className="catalogue-tools"><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search product, brand, variant, SKU or barcode…"/><select value={category} onChange={e=>setCategory(e.target.value)}>{CATEGORIES.map(x=><option key={x}>{x}</option>)}</select></div>
@@ -48,5 +79,6 @@ export default function CatalogueWorkspace({session}:{session:{staffId:string;ro
    <form className="content-card catalogue-receive-form" onSubmit={receive}><h3>Receive stock</h3><label>Receiving branch<select value={branch} onChange={e=>{setBranch(e.target.value);setWarehouse('');}} disabled={Boolean(data.assignedBranchId)}>{data.branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</select></label><label>Warehouse<select value={warehouse} onChange={e=>setWarehouse(e.target.value)}><option value="">Branch stock (no warehouse)</option>{warehouses.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label><div className="pos-two"><label>Quantity ({product.unit})<input type="number" min="0.0001" step="any" value={qty} onChange={e=>setQty(e.target.value)} required/></label><label>Unit cost<input type="number" min="0" step="0.01" value={cost} onChange={e=>setCost(e.target.value)} required/></label></div><label>Supplier invoice / reference<input value={reference} onChange={e=>setReference(e.target.value)} placeholder="Invoice number or delivery note"/></label><label>Notes<textarea rows={2} value={note} onChange={e=>setNote(e.target.value)}/></label><button className="primary" disabled={busy||!branch}>Receive stock</button></form>
   </section>}
   <section className="content-card"><div className="section-heading"><div><h3>Recent stock receipts</h3><p>Latest 30 receipt movements recorded on this computer.</p></div></div><div className="table-wrap"><table><thead><tr><th>Date</th><th>Product</th><th>Branch</th><th>Quantity</th><th>Unit cost</th><th>Total</th><th>Reference</th></tr></thead><tbody>{data.receipts.map(r=><tr key={r.id}><td>{r.createdAt}</td><td>{r.productName}</td><td>{r.branchName}</td><td>{r.quantity}</td><td>{r.unitCost.toFixed(2)}</td><td>{r.totalCost.toFixed(2)}</td><td>{r.reference||'—'}</td></tr>)}</tbody></table></div>{data.receipts.length===0&&<div className="empty-state">No stock receipts have been recorded yet.</div>}</section>
+  </>}
  </div>;
 }
