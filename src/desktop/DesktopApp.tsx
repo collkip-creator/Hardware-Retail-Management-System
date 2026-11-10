@@ -6,6 +6,7 @@ import InventoryWorkspace from './InventoryWorkspace';
 import SuppliersPurchasingWorkspace from './SuppliersPurchasingWorkspace';
 import CustomersWorkspace from './CustomersWorkspace';
 import AccountingWorkspace from './AccountingWorkspace';
+import ReportsWorkspace from './ReportsWorkspace';
 
 type LocalStatus = { setupRequired: boolean; deviceId: string; staffCount: number; schemaVersion: number };
 type StaffSession = { staffId: string; username: string; displayName: string; role: string; branchId: string | null; mustChangePassword?: boolean };
@@ -13,7 +14,7 @@ type BusinessProfile = { id: string; name: string; currency: string; timezone: s
 type Branch = { id: string; name: string; code: string | null; status: string };
 type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
 type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
-type Tab = 'overview' | 'catalogue' | 'pos' | 'inventory' | 'procurement' | 'customers' | 'accounting' | 'business' | 'branches' | 'staff' | 'devices';
+type Tab = 'overview' | 'catalogue' | 'pos' | 'inventory' | 'procurement' | 'customers' | 'accounting' | 'reports' | 'business' | 'branches' | 'staff' | 'devices';
 type SyncStatus = { paired: boolean; ownerDevice: boolean; licenceActive: boolean; licenceStatus: string; licenceMessage: string | null; lastSyncAt: string | null };
 type SyncResult = { ownerDevice: boolean; updatedAt: string; branches: number; staff: number };
 type PairingCodeResult = { code: string; expiresAt: string; ownerDevice: boolean };
@@ -241,6 +242,7 @@ export default function DesktopApp() {
       ...(['Manager', 'Storekeeper'].includes(session.role) ? [{ id: 'inventory' as Tab, label: 'Inventory' }, { id: 'procurement' as Tab, label: 'Suppliers & purchasing' }] : []),
       ...(['Manager', 'Supervisor', 'Cashier'].includes(session.role) ? [{ id: 'customers' as Tab, label: 'Customers' }] : []),
       ...(['Manager', 'Accountant'].includes(session.role) ? [{ id: 'accounting' as Tab, label: 'Accounting' }] : []),
+      ...(['Manager', 'Accountant'].includes(session.role) ? [{ id: 'reports' as Tab, label: 'Reports & management' }] : []),
     ];
     const activeStaffTab = staffTabs.some(item => item.id === tab) ? tab : 'catalogue';
     return <main className="app-shell staff-shell">
@@ -258,13 +260,14 @@ export default function DesktopApp() {
         {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace session={session} />}
         {activeStaffTab === 'customers' && <CustomersWorkspace session={session} />}
         {activeStaffTab === 'accounting' && <AccountingWorkspace session={session} />}
+        {activeStaffTab === 'reports' && <ReportsWorkspace session={session} />}
       </section>
     </main>;
   }
 
   const updateBusiness = (key: keyof BusinessProfile, value: string) => setBusiness(current => current ? { ...current, [key]: value } : current);
   const nav: { id: Tab; label: string; icon: string }[] = [
-    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'procurement',label:'Suppliers & purchasing',icon:'▧'},{id:'customers',label:'Customers',icon:'♙'},{id:'accounting',label:'Accounting',icon:'▣'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
+    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'procurement',label:'Suppliers & purchasing',icon:'▧'},{id:'customers',label:'Customers',icon:'♙'},{id:'accounting',label:'Accounting',icon:'▣'},{id:'reports',label:'Reports & management',icon:'▤'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
   ];
 
   return <main className="app-shell">
