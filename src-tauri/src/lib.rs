@@ -2241,7 +2241,7 @@ fn get_management_reports(
     let mut daily_stmt = c.prepare(
         "SELECT date(s.created_at),COUNT(*),COALESCE(SUM(s.subtotal),0),COALESCE(SUM(s.discount_amount),0),
          COALESCE((SELECT SUM(r.refund_total) FROM sale_returns r WHERE r.status='COMPLETED'
-          AND date(r.created_at)=date(s.created_at) AND r.branch_id=s.branch_id),0)
+          AND date(r.created_at)=date(s.created_at) AND (?3 IS NULL OR r.branch_id=?3)),0)
          FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
          AND date(s.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR s.branch_id=?3)
          GROUP BY date(s.created_at) ORDER BY date(s.created_at)"
