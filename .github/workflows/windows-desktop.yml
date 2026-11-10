@@ -11,6 +11,7 @@ on:
       - feature/suppliers-purchasing-ui-parity
       - feature/customers-desktop-phase
       - feature/pos-desktop-phase
+      - feature/master-catalogue-desktop
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
