@@ -60,7 +60,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
     setSales(rows||[]);
   }
   useEffect(()=>{load().catch(e=>setError(String(e)));},[session.staffId]);
-  useEffect(()=>{if(view==='history')loadSales().catch(e=>setError(String(e)));},[view,branchId,session.staffId]);
+  useEffect(()=>{if(branchId)loadSales().catch(e=>setError(String(e)));},[branchId,session.staffId]);
 
   const shift=workspace?.openShift&&workspace.openShift.branchId===branchId?workspace.openShift:null;
   const products=useMemo(()=> (workspace?.products||[]).filter(p=>(p.name+' '+p.sku).toLowerCase().includes(search.toLowerCase())),[workspace,search]);
@@ -84,7 +84,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
   function update(id:string,patch:Partial<{quantity:number;unitPrice:number;discountPercent:number}>){setBasket(rows=>rows.map(x=>x.productId===id?{...x,...patch}:x));}
   async function perform(action:()=>Promise<void>,success:string){
     setBusy(true);setError('');setNotice('');
-    try{await action();await load();setNotice(success);}
+    try{await action();await load();if(branchId)await loadSales();setNotice(success);}
     catch(e){setError(String(e).replace(/^Error: /,''));}
     finally{setBusy(false);}
   }
@@ -178,6 +178,16 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
           {!shift&&<p className="muted">Open a cashier shift before processing sales.</p>}
         </section>
       </div>
+      <section className="content-card pos-history-preview">
+        <div className="section-heading">
+          <div><h3>Recent sales history</h3><p>Latest receipts for the selected branch, including sales made earlier on this computer.</p></div>
+          <button type="button" className="primary" onClick={()=>setView('history')}>View full sales history</button>
+        </div>
+        {sales.length===0?<div className="empty-state">No sales have been recorded for this branch yet. Completed sales will appear here.</div>:sales.slice(0,5).map(s=><article className="purchase-card" key={s.id}>
+          <div className="record-row"><div className="record-copy"><strong>{s.receiptNumber}</strong><small>{new Date(s.createdAt).toLocaleString()} · {s.cashier||'Cashier'} · {s.paymentMethod} · {s.status||'COMPLETED'}</small></div><strong>{money(s.total)}</strong></div>
+          <div className="ledger-row"><span>{s.customerName||'Walk-in customer'} {s.customerPhone?'· '+s.customerPhone:''}</span><span>{s.discountAmount?('Discount: '+money(s.discountAmount)):'No discount'}</span></div>
+        </article>)}
+      </section>
     </>}
     {view==='history'&&<section className="content-card"><div className="section-heading"><div><h3>Recent sales</h3><p>Latest 100 receipts for this branch.</p></div><button className="secondary" onClick={()=>loadSales().catch(e=>setError(String(e)))}>Refresh</button></div><input className="pos-search" value={historySearch} onChange={e=>setHistorySearch(e.target.value)} placeholder="Search receipt, customer or cashier"/>{filteredSales.length===0?<div className="empty-state">No matching sales found.</div>:filteredSales.map(s=><article className="purchase-card" key={s.id}><div className="record-row"><div className="record-copy"><strong>{s.receiptNumber}</strong><small>{new Date(s.createdAt).toLocaleString()} · {s.cashier||'Cashier'} · {s.paymentMethod} · {s.status||'COMPLETED'}</small></div><strong>{money(s.total)}</strong></div><div className="ledger-row"><span>{s.customerName||'Walk-in customer'} {s.customerPhone?'· '+s.customerPhone:''}</span><span>{s.paymentReference||'No payment reference'}</span></div>{(s.status||'COMPLETED')!=='RETURNED'&&<button className="secondary" disabled={busy} onClick={()=>beginReturn(s)}>Process return / refund</button>}</article>)}
       {returnSale&&<section className="return-panel"><div className="section-heading"><div><h3>Return against {returnSale.receiptNumber}</h3><p>Only quantities not previously returned can be refunded.</p></div><button className="text-button" onClick={()=>setReturnSale(null)}>Cancel</button></div>
