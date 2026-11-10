@@ -206,6 +206,35 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         }
     }
     for (column, definition) in [
+        ("subtotal", "REAL NOT NULL DEFAULT 0"), ("discount_amount", "REAL NOT NULL DEFAULT 0"),
+        ("discount_type", "TEXT NOT NULL DEFAULT 'NONE'"), ("discount_value", "REAL NOT NULL DEFAULT 0"),
+        ("discount_approved_by", "TEXT"), ("discount_approved_at", "TEXT"),
+    ] {
+        if !has_column(connection, "sales", column)? { connection.execute_batch(&format!("ALTER TABLE sales ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?; }
+    }
+    for (column, definition) in [("discount_amount", "REAL NOT NULL DEFAULT 0"), ("net_line_total", "REAL NOT NULL DEFAULT 0")] {
+        if !has_column(connection, "sale_items", column)? { connection.execute_batch(&format!("ALTER TABLE sale_items ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?; }
+    }
+    connection.execute_batch("
+        CREATE TABLE IF NOT EXISTS sale_returns (
+            id TEXT PRIMARY KEY, return_number TEXT NOT NULL UNIQUE, sale_id TEXT NOT NULL REFERENCES sales(id),
+            branch_id TEXT NOT NULL REFERENCES branches(id), shift_id TEXT NOT NULL REFERENCES pos_shifts(id),
+            actor_staff_id TEXT NOT NULL REFERENCES staff_profiles(id), approved_by TEXT NOT NULL REFERENCES staff_profiles(id),
+            reason TEXT NOT NULL, refund_total REAL NOT NULL, cash_amount REAL NOT NULL DEFAULT 0,
+            mpesa_amount REAL NOT NULL DEFAULT 0, mpesa_reference TEXT, status TEXT NOT NULL DEFAULT 'COMPLETED',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS sale_return_items (
+            id TEXT PRIMARY KEY, return_id TEXT NOT NULL REFERENCES sale_returns(id),
+            sale_item_id TEXT NOT NULL REFERENCES sale_items(id), product_id TEXT NOT NULL REFERENCES products(id),
+            product_name TEXT NOT NULL, quantity REAL NOT NULL, unit_refund REAL NOT NULL,
+            refund_amount REAL NOT NULL, restock_quantity REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_sale_returns_sale ON sale_returns(sale_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_sale_return_items_sale_item ON sale_return_items(sale_item_id);
+    ").map_err(|e| e.to_string())?;
+
+    for (column, definition) in [
         ("customer_id", "TEXT"),
         ("customer_name", "TEXT"),
         ("customer_phone", "TEXT"),
@@ -1236,66 +1265,108 @@ fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,
     Ok(serde_json::json!({"id":id,"branchId":branch_id,"openingFloat":opening_float,"status":"OPEN"}))
 }
 
-#[tauri::command]
-fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,cash_amount:f64,mpesa_amount:f64,payment_reference:Option<String>,customer_id:Option<String>,customer_name:Option<String>,customer_phone:Option<String>)->Result<serde_json::Value,String>{
-    if items.is_empty()||items.len()>80{return Err("Add between 1 and 80 sale lines.".into());}
-    let method=payment_method.trim().to_uppercase();
-    if !["CASH","MPESA","SPLIT"].contains(&method.as_str()){return Err("Select Cash, M-Pesa or split payment.".into());}
-    if !cash_amount.is_finite()||cash_amount<0.0||!mpesa_amount.is_finite()||mpesa_amount<0.0{return Err("Payment amounts must be valid non-negative numbers.".into());}
-    if mpesa_amount>0.0&&payment_reference.as_deref().unwrap_or("").trim().is_empty(){return Err("Enter the M-Pesa transaction reference.".into());}
-    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
-    let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}
-    ensure_branch_not_in_stocktake(&c,&branch_id)?;
-    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
-    let mut total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();
-    for item in &items{
-        let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;
-        let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;
-        if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}
-        let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
-        ensure_branch_not_in_stocktake(&tx,&branch_id)?;
-        let stock:f64=tx.query_row("SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-        let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();
-        if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
-        let price=product.2;
-        let line_total=(qty*price*100.0).round()/100.0;total+=line_total;
-        let unit_cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND movement_type='RECEIPT'",params![pid,branch_id,product.3],|r|r.get(0)).map_err(|e|e.to_string())?;
-        lines.push(serde_json::json!({"productId":pid,"name":product.0,"quantity":qty,"unitPrice":price,"unitCost":unit_cost,"lineTotal":line_total}));
-    }
-    total=(total*100.0).round()/100.0;
-    let receipt=format!("HR-{}",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>().to_uppercase());
-    let sale_id=Uuid::new_v4().to_string();
-    let (linked_customer_id, linked_customer_name, linked_customer_phone) = if let Some(cid)=customer_id.as_deref() {
-        let row:Option<(String,String)>=tx.query_row("SELECT name,phone FROM customers WHERE id=?1 AND business_id=(SELECT business_id FROM branches WHERE id=?2) AND active=1",params![cid,branch_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
-        let (name,phone)=row.ok_or_else(||"The selected customer is unavailable for this business.".to_string())?;
-        (Some(cid.to_string()),Some(name),Some(phone))
-    } else {
-        let name=customer_name.as_deref().unwrap_or("").trim().to_string();
-        let phone=customer_phone.as_deref().unwrap_or("").trim().to_string();
-        (None,if name.is_empty(){None}else{Some(name)},if phone.is_empty(){None}else{Some(phone)})
-    };
-    if (cash_amount+mpesa_amount-total).abs()>0.01{return Err("Cash and M-Pesa payments must add up exactly to the sale total.".into());}
-    let actual_method=if cash_amount>0.0&&mpesa_amount>0.0{"SPLIT"}else if mpesa_amount>0.0{"MPESA"}else{"CASH"};
-    if method!=actual_method{return Err("Payment method does not match the entered payment amounts.".into());}
-    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone,cash_amount,mpesa_amount) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone,cash_amount,mpesa_amount]).map_err(|e|e.to_string())?;
-    let business_id:String=tx.query_row("SELECT business_id FROM branches WHERE id=?1",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if cash_amount>0.0 {
-        tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'CASH',NULL,?4,'POS_SALE',?5,?6)",params![Uuid::new_v4().to_string(),business_id,cash_amount,format!("Cash received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;
-    }
-    if mpesa_amount>0.0 {
-        tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'MPESA',?4,?5,'POS_SALE',?6,?7)",params![Uuid::new_v4().to_string(),business_id,mpesa_amount,payment_reference.as_deref().unwrap_or(""),format!("M-Pesa received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;
-    }
-    for line in &lines{
-        let item_id=Uuid::new_v4().to_string();
-        tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item_id,sale_id,line["productId"].as_str(),line["name"].as_str(),line["quantity"].as_f64(),line["unitPrice"].as_f64(),line["unitCost"].as_f64(),line["lineTotal"].as_f64()]).map_err(|e|e.to_string())?;
-        tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'SALE',?4,-?4,?5,?6,?7,?8)",params![Uuid::new_v4().to_string(),line["productId"].as_str(),branch_id,line["quantity"].as_f64(),line["unitCost"].as_f64(),line["quantity"].as_f64().unwrap_or(0.0)*line["unitCost"].as_f64().unwrap_or(0.0),receipt,actor_staff_id]).map_err(|e|e.to_string())?;
-    }
-    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SALE_COMPLETED','sale',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,sale_id,serde_json::json!({"receiptNumber":receipt,"total":total,"paymentMethod":method}).to_string()]).map_err(|e|e.to_string())?;
-    tx.commit().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"total":total,"paymentMethod":method,"customerId":linked_customer_id,"customerName":linked_customer_name,"customerPhone":linked_customer_phone,"items":lines}))
+fn pos_approval_actor(c:&Connection,actor_staff_id:&str,branch_id:&str,approver_username:Option<&str>,approver_password:Option<&str>)->Result<String,String>{
+    let actor_role:String=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?.ok_or_else(||"Your staff account is inactive.".to_string())?;
+    if actor_role=="Business Owner"||actor_role=="Manager"{return Ok(actor_staff_id.to_string());}
+    let username=approver_username.unwrap_or("").trim();let password=approver_password.unwrap_or("");
+    if username.is_empty()||password.is_empty(){return Err("A Business Owner or Manager must approve this discount or return. Enter their staff username and password.".into());}
+    let record:Option<(String,String,Option<String>,String)>=c.query_row("SELECT p.id,p.role,p.branch_id,a.password_hash FROM staff_accounts a JOIN staff_profiles p ON p.id=a.staff_profile_id WHERE lower(a.username)=lower(?1) AND a.status='active' AND p.status='active'",[username],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?;
+    let (id,role,assigned,hash)=record.ok_or_else(||"The approving staff account was not found or is inactive.".to_string())?;
+    if role!="Business Owner"&&role!="Manager"{return Err("Only a Business Owner or Manager can approve discounts and returns.".into());}
+    if role!="Business Owner"&&assigned.as_deref().is_some_and(|b|b!=branch_id){return Err("The approving Manager must be assigned to this branch.".into());}
+    if !verify_password(password,&hash)?{return Err("The approving Manager's password is incorrect.".into());}Ok(id)
 }
 
+#[tauri::command]
+fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,branch_id:String,shift_id:String,items:Vec<serde_json::Value>,payment_method:String,cash_amount:f64,mpesa_amount:f64,payment_reference:Option<String>,customer_id:Option<String>,customer_name:Option<String>,customer_phone:Option<String>,order_discount_percent:Option<f64>,approver_username:Option<String>,approver_password:Option<String>)->Result<serde_json::Value,String>{
+    if items.is_empty()||items.len()>80{return Err("Add between 1 and 80 sale lines.".into());}
+    let method=payment_method.trim().to_uppercase();if !["CASH","MPESA","SPLIT"].contains(&method.as_str()){return Err("Select Cash, M-Pesa or split payment.".into());}
+    if !cash_amount.is_finite()||cash_amount<0.0||!mpesa_amount.is_finite()||mpesa_amount<0.0{return Err("Payment amounts must be valid non-negative numbers.".into());}
+    if mpesa_amount>0.0&&payment_reference.as_deref().unwrap_or("").trim().is_empty(){return Err("Enter the M-Pesa transaction reference.".into());}
+    let order_pct=order_discount_percent.unwrap_or(0.0);if !order_pct.is_finite()||!(0.0..=100.0).contains(&order_pct){return Err("Order discount must be between 0% and 100%.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}ensure_branch_not_in_stocktake(&c,&branch_id)?;
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;let mut subtotal=0.0f64;let mut eligible_total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();let mut has_discount=order_pct>0.0;
+    for item in &items{
+        let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;let pct=item["discountPercent"].as_f64().unwrap_or(0.0);
+        if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}if !pct.is_finite()||!(0.0..=100.0).contains(&pct){return Err("Each product discount must be between 0% and 100%.".into());}
+        let product:(String,String,f64,f64)=tx.query_row("SELECT name,unit,selling_price,buying_price FROM products WHERE id=?1 AND status='active'",[pid],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"A selected product is no longer active.".to_string())?;
+        let stock:f64=tx.query_row("SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+        let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
+        let gross=(qty*product.2*100.0).round()/100.0;let line_discount=(gross*pct/100.0*100.0).round()/100.0;let eligible=(gross-line_discount).max(0.0);
+        subtotal+=gross;eligible_total+=eligible;if pct>0.0{has_discount=true;}
+        let unit_cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND movement_type='RECEIPT'",params![pid,branch_id,product.3],|r|r.get(0)).map_err(|e|e.to_string())?;
+        lines.push(serde_json::json!({"productId":pid,"name":product.0,"quantity":qty,"unitPrice":product.2,"unitCost":unit_cost,"grossTotal":gross,"lineDiscount":line_discount,"eligibleTotal":eligible,"lineDiscountPercent":pct}));
+    }
+    subtotal=(subtotal*100.0).round()/100.0;eligible_total=(eligible_total*100.0).round()/100.0;
+    let order_discount=(eligible_total*order_pct/100.0*100.0).round()/100.0;let mut discount_total=0.0f64;
+    for line in &mut lines{let share=if eligible_total>0.0{(line["eligibleTotal"].as_f64().unwrap_or(0.0)/eligible_total*order_discount*100.0).round()/100.0}else{0.0};let discount=line["lineDiscount"].as_f64().unwrap_or(0.0)+share;let net=(line["grossTotal"].as_f64().unwrap_or(0.0)-discount).max(0.0);line["discountAmount"]=serde_json::json!(discount);line["netLineTotal"]=serde_json::json!(net);discount_total+=discount;}
+    discount_total=(discount_total*100.0).round()/100.0;let total=(subtotal-discount_total).max(0.0);
+    let approver=if has_discount{Some(pos_approval_actor(&tx,&actor_staff_id,&branch_id,approver_username.as_deref(),approver_password.as_deref())?)}else{None};
+    let receipt=format!("HR-{}",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>().to_uppercase());let sale_id=Uuid::new_v4().to_string();
+    let (linked_customer_id,linked_customer_name,linked_customer_phone)=if let Some(cid)=customer_id.as_deref(){let row:Option<(String,String)>=tx.query_row("SELECT name,phone FROM customers WHERE id=?1 AND business_id=(SELECT business_id FROM branches WHERE id=?2) AND active=1",params![cid,branch_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;let (n,p)=row.ok_or_else(||"The selected customer is unavailable for this business.".to_string())?;(Some(cid.to_string()),Some(n),Some(p))}else{let n=customer_name.as_deref().unwrap_or("").trim().to_string();let p=customer_phone.as_deref().unwrap_or("").trim().to_string();(None,if n.is_empty(){None}else{Some(n)},if p.is_empty(){None}else{Some(p)})};
+    if (cash_amount+mpesa_amount-total).abs()>0.01{return Err("Cash and M-Pesa payments must add up exactly to the discounted sale total.".into());}
+    let actual=if cash_amount>0.0&&mpesa_amount>0.0{"SPLIT"}else if mpesa_amount>0.0{"MPESA"}else{"CASH"};if method!=actual{return Err("Payment method does not match the entered payment amounts.".into());}
+    let business_id:String=tx.query_row("SELECT business_id FROM branches WHERE id=?1",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone,cash_amount,mpesa_amount,subtotal,discount_amount,discount_type,discount_value,discount_approved_by,discount_approved_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,CASE WHEN ?18 IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone,cash_amount,mpesa_amount,subtotal,discount_total,if has_discount{"PERCENT"}else{"NONE"},order_pct,approver]).map_err(|e|e.to_string())?;
+    if cash_amount>0.0{tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'CASH',NULL,?4,'POS_SALE',?5,?6)",params![Uuid::new_v4().to_string(),business_id,cash_amount,format!("Cash received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;}
+    if mpesa_amount>0.0{tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'MPESA',?4,?5,'POS_SALE',?6,?7)",params![Uuid::new_v4().to_string(),business_id,mpesa_amount,payment_reference.as_deref().unwrap_or(""),format!("M-Pesa received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;}
+    for line in &lines{let id=Uuid::new_v4().to_string();let qty=line["quantity"].as_f64().unwrap_or(0.0);let cost=line["unitCost"].as_f64().unwrap_or(0.0);let gross=line["grossTotal"].as_f64().unwrap_or(0.0);let discount=line["discountAmount"].as_f64().unwrap_or(0.0);let net=line["netLineTotal"].as_f64().unwrap_or(0.0);
+        tx.execute("INSERT INTO sale_items(id,sale_id,product_id,product_name,quantity,unit_price,unit_cost,line_total,discount_amount,net_line_total) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,sale_id,line["productId"].as_str(),line["name"].as_str(),qty,line["unitPrice"].as_f64(),cost,gross,discount,net]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'SALE',?4,-?4,?5,?6,?7,?8)",params![Uuid::new_v4().to_string(),line["productId"].as_str(),branch_id,qty,cost,qty*cost,receipt,actor_staff_id]).map_err(|e|e.to_string())?;
+    }
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SALE_COMPLETED','sale',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,sale_id,serde_json::json!({"receiptNumber":receipt,"subtotal":subtotal,"discountAmount":discount_total,"total":total,"paymentMethod":method,"approvedBy":approver}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"subtotal":subtotal,"discountAmount":discount_total,"total":total,"paymentMethod":method,"customerId":linked_customer_id,"customerName":linked_customer_name,"customerPhone":linked_customer_phone,"items":lines,"discountApprovedBy":approver}))
+}
+
+#[tauri::command]
+fn get_pos_sale_details(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,sale_id:String)->Result<serde_json::Value,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;let (_,assigned,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Supervisor","Cashier"])?;
+    let sale:Option<serde_json::Value>=c.query_row("SELECT s.id,s.receipt_number,s.branch_id,s.total,s.subtotal,s.discount_amount,s.payment_method,s.cash_amount,s.mpesa_amount,COALESCE(s.payment_reference,''),COALESCE(s.customer_name,''),s.status,s.created_at FROM sales s JOIN branches b ON b.id=s.branch_id WHERE s.id=?1 AND b.business_id=?2 AND (?3 IS NULL OR s.branch_id=?3)",params![sale_id,business,assigned],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"receiptNumber":r.get::<_,String>(1)?,"branchId":r.get::<_,String>(2)?,"total":r.get::<_,f64>(3)?,"subtotal":r.get::<_,f64>(4)?,"discountAmount":r.get::<_,f64>(5)?,"paymentMethod":r.get::<_,String>(6)?,"cashAmount":r.get::<_,f64>(7)?,"mpesaAmount":r.get::<_,f64>(8)?,"paymentReference":r.get::<_,String>(9)?,"customerName":r.get::<_,String>(10)?,"status":r.get::<_,String>(11)?,"createdAt":r.get::<_,String>(12)?}))).optional().map_err(|e|e.to_string())?;
+    let sale=sale.ok_or_else(||"Sale not found for your business or assigned branch.".to_string())?;
+    let mut stmt=c.prepare("SELECT si.id,si.product_id,si.product_name,si.quantity,si.unit_price,si.unit_cost,si.line_total,si.discount_amount,si.net_line_total,COALESCE((SELECT SUM(ri.quantity) FROM sale_return_items ri WHERE ri.sale_item_id=si.id),0) FROM sale_items si WHERE si.sale_id=?1 ORDER BY si.rowid").map_err(|e|e.to_string())?;
+    let items=stmt.query_map([&sale_id],|r|Ok(serde_json::json!({"saleItemId":r.get::<_,String>(0)?,"productId":r.get::<_,String>(1)?,"productName":r.get::<_,String>(2)?,"quantity":r.get::<_,f64>(3)?,"unitPrice":r.get::<_,f64>(4)?,"unitCost":r.get::<_,f64>(5)?,"lineTotal":r.get::<_,f64>(6)?,"discountAmount":r.get::<_,f64>(7)?,"netLineTotal":r.get::<_,f64>(8)?,"returnedQuantity":r.get::<_,f64>(9)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"sale":sale,"items":items}))
+}
+
+#[tauri::command]
+fn process_pos_return(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,sale_id:String,items:Vec<serde_json::Value>,reason:String,cash_amount:f64,mpesa_amount:f64,payment_reference:Option<String>,approver_username:Option<String>,approver_password:Option<String>)->Result<serde_json::Value,String>{
+    let reason=reason.trim();if reason.len()<3||reason.len()>300{return Err("Enter a return reason between 3 and 300 characters.".into());}
+    if items.is_empty()||items.len()>80{return Err("Select at least one sale item to return.".into());}
+    if !cash_amount.is_finite()||cash_amount<0.0||!mpesa_amount.is_finite()||mpesa_amount<0.0{return Err("Refund amounts must be valid non-negative numbers.".into());}
+    if mpesa_amount>0.0&&payment_reference.as_deref().unwrap_or("").trim().is_empty(){return Err("Enter the M-Pesa refund reference.".into());}
+    let mut c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;let tx=c.transaction().map_err(|e|e.to_string())?;
+    let (branch,business):(String,String)=tx.query_row("SELECT s.branch_id,b.business_id FROM sales s JOIN branches b ON b.id=s.branch_id WHERE s.id=?1",[&sale_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Original sale was not found.".to_string())?;
+    ensure_branch_access(&tx,&actor_staff_id,&branch)?;ensure_branch_not_in_stocktake(&tx,&branch)?;
+    let actor:Option<(String,Option<String>)>=tx.query_row("SELECT role,branch_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+    let (role,assigned)=actor.ok_or_else(||"Your staff account is inactive.".to_string())?;if !["Business Owner","Manager","Supervisor","Cashier"].contains(&role.as_str()){return Err("Your role is not authorised to process POS returns.".into());}if assigned.as_deref().is_some_and(|b|b!=branch){return Err("You can only return sales from your assigned branch.".into());}
+    let approver=pos_approval_actor(&tx,&actor_staff_id,&branch,approver_username.as_deref(),approver_password.as_deref())?;
+    let shift:Option<String>=tx.query_row("SELECT id FROM pos_shifts WHERE cashier_staff_id=?1 AND branch_id=?2 AND status='OPEN' ORDER BY opened_at DESC LIMIT 1",params![actor_staff_id,branch],|r|r.get(0)).optional().map_err(|e|e.to_string())?;let shift=shift.ok_or_else(||"Open a cashier shift at the original sale's branch before issuing a refund.".to_string())?;
+    let status:String=tx.query_row("SELECT status FROM sales WHERE id=?1",[&sale_id],|r|r.get(0)).map_err(|e|e.to_string())?;if status=="VOID"||status=="CANCELLED"{return Err("This sale cannot be returned.".into());}
+    let mut refund=0.0f64;let mut accepted=Vec::new();let mut seen=std::collections::HashSet::new();
+    for item in &items{let item_id=item["saleItemId"].as_str().ok_or_else(||"A return line is missing its original sale item.".to_string())?;if !seen.insert(item_id.to_string()){return Err("The same sale item cannot appear twice in one return.".into());}
+        let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid return quantity.".to_string())?;if !qty.is_finite()||qty<=0.0{return Err("Return quantities must be greater than zero.".into());}
+        let restock=item["restock"].as_bool().unwrap_or(true);
+        let row:Option<(String,String,f64,f64,f64)>=tx.query_row("SELECT product_id,product_name,quantity,unit_price,net_line_total FROM sale_items WHERE id=?1 AND sale_id=?2",params![item_id,sale_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(|e|e.to_string())?;
+        let (pid,name,sold,price,net)=row.ok_or_else(||"A selected item does not belong to the original sale.".to_string())?;
+        let already:f64=tx.query_row("SELECT COALESCE(SUM(quantity),0) FROM sale_return_items WHERE sale_item_id=?1",[item_id],|r|r.get(0)).map_err(|e|e.to_string())?;let remaining=(sold-already).max(0.0);if qty>remaining+0.000001{return Err(format!("Return quantity for {} exceeds the unreturned quantity ({remaining}).",name));}
+        let unit=if sold>0.0{net/sold}else{price};let amount=(unit*qty*100.0).round()/100.0;refund+=amount;accepted.push((item_id.to_string(),pid,name,qty,unit,amount,restock));
+    }
+    refund=(refund*100.0).round()/100.0;if (cash_amount+mpesa_amount-refund).abs()>0.01{return Err(format!("Cash and M-Pesa refunds must add up exactly to {}.",refund));}
+    if refund>0.0&&cash_amount+mpesa_amount<=0.0{return Err("Enter the refund payment amounts.".into());}
+    let id=Uuid::new_v4().to_string();let number=format!("RT-{}",Uuid::new_v4().simple().to_string().chars().take(10).collect::<String>().to_uppercase());
+    tx.execute("INSERT INTO sale_returns(id,return_number,sale_id,branch_id,shift_id,actor_staff_id,approved_by,reason,refund_total,cash_amount,mpesa_amount,mpesa_reference) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id,number,sale_id,branch,shift,actor_staff_id,approver,reason,refund,cash_amount,mpesa_amount,payment_reference]).map_err(|e|e.to_string())?;
+    for (item_id,pid,name,qty,unit,amount,restock) in &accepted{let restock_qty=if *restock{*qty}else{0.0};tx.execute("INSERT INTO sale_return_items(id,return_id,sale_item_id,product_id,product_name,quantity,unit_refund,refund_amount,restock_quantity) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![Uuid::new_v4().to_string(),id,item_id,pid,name,qty,unit,amount,restock_qty]).map_err(|e|e.to_string())?;
+        if restock_qty>0.0{tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'RETURN',?4,?4,0,0,?5,?6)",params![Uuid::new_v4().to_string(),pid,branch,restock_qty,number,actor_staff_id]).map_err(|e|e.to_string())?;}
+    }
+    if cash_amount>0.0{tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_RETURN','OUT',?3,'CASH',NULL,?4,'POS_RETURN',?5,?6)",params![Uuid::new_v4().to_string(),business,cash_amount,format!("Cash refund {}",number),id,actor_staff_id]).map_err(|e|e.to_string())?;}
+    if mpesa_amount>0.0{tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_RETURN','OUT',?3,'MPESA',?4,?5,'POS_RETURN',?6,?7)",params![Uuid::new_v4().to_string(),business,mpesa_amount,payment_reference.as_deref().unwrap_or(""),format!("M-Pesa refund {}",number),id,actor_staff_id]).map_err(|e|e.to_string())?;}
+    let (sold,returned):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(si.quantity),0),COALESCE((SELECT SUM(ri.quantity) FROM sale_return_items ri JOIN sale_returns rr ON rr.id=ri.return_id WHERE rr.sale_id=?1),0) FROM sale_items si WHERE si.sale_id=?1",[&sale_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+    let new_status=if returned>=sold-0.000001{"RETURNED"}else{"PARTIALLY_RETURNED"};tx.execute("UPDATE sales SET status=?1 WHERE id=?2",params![new_status,sale_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_RETURN_COMPLETED','sale_return',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"returnNumber":number,"saleId":sale_id,"refundTotal":refund,"cashAmount":cash_amount,"mpesaAmount":mpesa_amount,"reason":reason,"approvedBy":approver,"status":new_status}).to_string()]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"returnNumber":number,"saleId":sale_id,"refundTotal":refund,"cashAmount":cash_amount,"mpesaAmount":mpesa_amount,"status":new_status,"approvedBy":approver}))
+}
 
 #[tauri::command]
 fn close_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,shift_id:String,closing_cash:f64,closing_mpesa:f64)->Result<serde_json::Value,String>{
@@ -1305,7 +1376,9 @@ fn close_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String
     let row:Option<(String,String,f64)>=tx.query_row("SELECT branch_id,cashier_staff_id,opening_float FROM pos_shifts WHERE id=?1 AND status='OPEN'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?;
     let (branch,cashier,opening)=row.ok_or_else(||"This cashier shift is no longer open.".to_string())?;
     if cashier!=actor_staff_id{return Err("Only the cashier who opened this shift can close it.".into());}
-    let (cash_sales,mpesa_sales):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(CASE WHEN cash_amount>0 OR mpesa_amount>0 THEN cash_amount ELSE CASE WHEN payment_method='CASH' THEN total ELSE 0 END END),0),COALESCE(SUM(CASE WHEN cash_amount>0 OR mpesa_amount>0 THEN mpesa_amount ELSE CASE WHEN payment_method='MPESA' THEN total ELSE 0 END END),0) FROM sales WHERE shift_id=?1 AND status='COMPLETED'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+    let (sale_cash,sale_mpesa):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(CASE WHEN cash_amount>0 OR mpesa_amount>0 THEN cash_amount ELSE CASE WHEN payment_method='CASH' THEN total ELSE 0 END END),0),COALESCE(SUM(CASE WHEN cash_amount>0 OR mpesa_amount>0 THEN mpesa_amount ELSE CASE WHEN payment_method='MPESA' THEN total ELSE 0 END END),0) FROM sales WHERE shift_id=?1 AND status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+    let (refund_cash,refund_mpesa):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(cash_amount),0),COALESCE(SUM(mpesa_amount),0) FROM sale_returns WHERE shift_id=?1 AND status='COMPLETED'",[&shift_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+    let cash_sales=sale_cash-refund_cash;let mpesa_sales=sale_mpesa-refund_mpesa;
     let expected_cash=opening+cash_sales;
     let cash_variance=closing_cash-expected_cash;
     let mpesa_variance=closing_mpesa-mpesa_sales;
@@ -1955,6 +2028,8 @@ pub fn run() {
             receive_pos_stock,
             open_pos_shift,
             process_pos_sale,
+            get_pos_sale_details,
+            process_pos_return,
             close_pos_shift,
             get_pos_sales_history,
             get_inventory_workspace,
