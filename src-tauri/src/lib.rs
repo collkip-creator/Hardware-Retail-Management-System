@@ -2219,7 +2219,10 @@ fn get_audit_trail(
                 a.event_type, COALESCE(a.entity_type,''), COALESCE(a.entity_id,''),
                 COALESCE(a.details_json,'{}'),
                 COALESCE(json_extract(a.details_json,'$.branchId'), CASE WHEN a.entity_type='branch' THEN a.entity_id ELSE NULL END),
-                COALESCE(b.name,'')
+                COALESCE(b.name,''),
+                COALESCE((SELECT approver.display_name FROM staff_profiles approver
+                          WHERE approver.id=json_extract(a.details_json,'$.approvedBy')
+                            AND approver.business_id=?2),'')
          FROM audit_events a
          JOIN staff_profiles owner_actor ON owner_actor.id=?1 AND owner_actor.business_id=?2
          LEFT JOIN staff_profiles sp ON sp.id=a.actor_staff_id AND sp.business_id=?2
@@ -2232,7 +2235,13 @@ fn get_audit_trail(
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![actor_staff_id,business_id,start,end,branch_id,event_type], |r| {
         let details: String = r.get(6)?;
-        let parsed: serde_json::Value = serde_json::from_str(&details).unwrap_or(serde_json::json!({}));
+        let mut parsed: serde_json::Value = serde_json::from_str(&details).unwrap_or(serde_json::json!({}));
+        if let serde_json::Value::Object(ref mut fields) = parsed {
+            let approver_name: String = r.get(9)?;
+            if !approver_name.is_empty() {
+                fields.insert("approvedByName".to_string(), serde_json::Value::String(approver_name));
+            }
+        }
         Ok(serde_json::json!({
             "id":r.get::<_,String>(0)?,"createdAt":r.get::<_,String>(1)?,
             "staff":r.get::<_,String>(2)?,"eventType":r.get::<_,String>(3)?,
