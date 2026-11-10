@@ -1356,10 +1356,10 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let mut sale_journal=Vec::new();
     if cash_amount>0.0{sale_journal.push(("1000".to_string(),cash_amount,0.0));}
     if mpesa_amount>0.0{sale_journal.push(("1010".to_string(),mpesa_amount,0.0));}
-    sale_journal.push(("4000".to_string(),0.0,total));
+    if total>0.0{sale_journal.push(("4000".to_string(),0.0,total));}
     let cost_total=(lines.iter().map(|line|line["quantity"].as_f64().unwrap_or(0.0)*line["unitCost"].as_f64().unwrap_or(0.0)).sum::<f64>()*100.0).round()/100.0;
     if cost_total>0.0{sale_journal.push(("5000".to_string(),cost_total,0.0));sale_journal.push(("1200".to_string(),0.0,cost_total));}
-    post_local_journal(&tx,&business_id,&actor_staff_id,"SALE",&sale_id,&receipt,&format!("POS sale {}",receipt),&chrono_free_today(),sale_journal)?;
+    if total>0.0||cost_total>0.0{post_local_journal(&tx,&business_id,&actor_staff_id,"SALE",&sale_id,&receipt,&format!("POS sale {}",receipt),&chrono_free_today(),sale_journal)?;}
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_SALE_COMPLETED','sale',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,sale_id,serde_json::json!({"receiptNumber":receipt,"subtotal":subtotal,"discountAmount":discount_total,"total":total,"paymentMethod":method,"approvedBy":approver}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":sale_id,"receiptNumber":receipt,"subtotal":subtotal,"discountAmount":discount_total,"total":total,"paymentMethod":method,"customerId":linked_customer_id,"customerName":linked_customer_name,"customerPhone":linked_customer_phone,"items":lines,"discountApprovedBy":approver}))
 }
@@ -1417,7 +1417,7 @@ fn process_pos_return(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Str
     if mpesa_amount>0.0{return_journal.push(("1010".to_string(),0.0,mpesa_amount));}
     let restocked_cost=(accepted.iter().filter(|x|x.6).map(|x|x.3*x.7).sum::<f64>()*100.0).round()/100.0;
     if restocked_cost>0.0{return_journal.push(("1200".to_string(),restocked_cost,0.0));return_journal.push(("5000".to_string(),0.0,restocked_cost));}
-    post_local_journal(&tx,&business,&actor_staff_id,"RETURN",&id,&number,&format!("Customer return {}",number),&chrono_free_today(),return_journal)?;
+    if refund>0.0||restocked_cost>0.0{post_local_journal(&tx,&business,&actor_staff_id,"RETURN",&id,&number,&format!("Customer return {}",number),&chrono_free_today(),return_journal)?;}
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'POS_RETURN_COMPLETED','sale_return',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,id,serde_json::json!({"returnNumber":number,"saleId":sale_id,"refundTotal":refund,"cashAmount":cash_amount,"mpesaAmount":mpesa_amount,"reason":reason,"approvedBy":approver,"status":new_status}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"returnNumber":number,"saleId":sale_id,"refundTotal":refund,"cashAmount":cash_amount,"mpesaAmount":mpesa_amount,"status":new_status,"approvedBy":approver}))
 }
@@ -1504,7 +1504,7 @@ fn get_accounting_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_
     ensure_local_accounting_accounts(&c,&business)?;
     let mut asmt=c.prepare("SELECT code,name,account_type,account_group,active,is_system FROM accounting_accounts WHERE business_id=?1 ORDER BY code").map_err(|e|e.to_string())?;
     let accounts=asmt.query_map([&business],|r|Ok(serde_json::json!({"code":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"group":r.get::<_,String>(3)?,"active":r.get::<_,i64>(4)?==1,"system":r.get::<_,i64>(5)?==1}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let mut jstmt=c.prepare("SELECT id,source_type,source_id,reference,description,entry_date,total_debit,total_credit,created_at FROM journal_entries WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC LIMIT 200").map_err(|e|e.to_string())?;
+    let mut jstmt=c.prepare("SELECT id,source_type,source_id,reference,description,entry_date,total_debit,total_credit,created_at FROM journal_entries WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC").map_err(|e|e.to_string())?;
     let raw=jstmt.query_map([&business],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,f64>(6)?,r.get::<_,f64>(7)?,r.get::<_,String>(8)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let mut journals=Vec::new();
     for (id,source_type,source_id,reference,description,date,total_debit,total_credit,created_at) in raw{
@@ -2160,7 +2160,7 @@ fn record_supplier_payment(database:tauri::State<'_,LocalDatabase>,actor_staff_i
     tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id,created_at) VALUES(?1,?2,'SUPPLIER_PAYMENT','OUT',?3,?4,?5,?6,'PURCHASE_ORDER',?7,?8,?9)",params![Uuid::new_v4().to_string(),business,amount,method,reference,format!("Supplier payment to {} for {}",supplier_name,order_number),purchase_id,actor_staff_id,now]).map_err(|e|e.to_string())?;
     let cash_code=match method.as_str(){"CASH"=>"1000","MPESA"=>"1010",_=>"1020"};
     let payment_source_id=format!("{}:{}",purchase_id,payments.len());
-    post_local_journal(&tx,&business,&actor_staff_id,"SUPPLIER_PAYMENT",&payment_source_id,if reference.is_empty(){&order_number}else{reference},&format!("Supplier payment to {} for {}",supplier_name,order_number),&chrono_free_today(),vec![("2000".to_string(),amount,0.0),(cash_code.to_string(),0.0,amount)])?;
+    post_local_journal(&tx,&business,&actor_staff_id,"SUPPLIER_PAYMENT",&payment_source_id,if reference.is_empty(){order_number.as_str()}else{reference},&format!("Supplier payment to {} for {}",supplier_name,order_number),&chrono_free_today(),vec![("2000".to_string(),amount,0.0),(cash_code.to_string(),0.0,amount)])?;
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json) VALUES(?1,?2,'SUPPLIER_PAYMENT_RECORDED','purchase_order',?3,?4)",params![Uuid::new_v4().to_string(),actor_staff_id,purchase_id,serde_json::json!({"amount":amount,"paymentMethod":method,"reference":reference,"paymentStatus":pay_status}).to_string()]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     Ok(serde_json::json!({"purchaseId":purchase_id,"paidAmount":next_paid,"outstanding":(total-next_paid).max(0.0),"paymentStatus":pay_status,"orderStatus":status}))
