@@ -1354,8 +1354,12 @@ fn process_pos_return(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Str
         let restock=item["restock"].as_bool().unwrap_or(true);
         let row:Option<(String,String,f64,f64,f64,f64)>=tx.query_row("SELECT product_id,product_name,quantity,unit_price,net_line_total,unit_cost FROM sale_items WHERE id=?1 AND sale_id=?2",params![item_id,sale_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(|e|e.to_string())?;
         let (pid,name,sold,price,net,unit_cost)=row.ok_or_else(||"A selected item does not belong to the original sale.".to_string())?;
-        let already:f64=tx.query_row("SELECT COALESCE(SUM(quantity),0) FROM sale_return_items WHERE sale_item_id=?1",[item_id],|r|r.get(0)).map_err(|e|e.to_string())?;let remaining=(sold-already).max(0.0);if qty>remaining+0.000001{return Err(format!("Return quantity for {} exceeds the unreturned quantity ({remaining}).",name));}
-        let unit=if sold>0.0{net/sold}else{price};let amount=(unit*qty*100.0).round()/100.0;refund+=amount;accepted.push((item_id.to_string(),pid,name,qty,unit,amount,restock,unit_cost));
+        let (already,already_refunded):(f64,f64)=tx.query_row("SELECT COALESCE(SUM(quantity),0),COALESCE(SUM(refund_amount),0) FROM sale_return_items WHERE sale_item_id=?1",[item_id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
+        let remaining=(sold-already).max(0.0);if qty>remaining+0.000001{return Err(format!("Return quantity for {} exceeds the unreturned quantity ({remaining}).",name));}
+        let unit=if sold>0.0{net/sold}else{price};let remaining_refund=(net-already_refunded).max(0.0);
+        let amount=if (qty-remaining).abs()<0.000001{remaining_refund}else{(unit*qty*100.0).round()/100.0};
+        if amount>remaining_refund+0.01{return Err("The requested partial return would exceed the original discounted line value.".into());}
+        refund+=amount;accepted.push((item_id.to_string(),pid,name,qty,unit,amount,restock,unit_cost));
     }
     refund=(refund*100.0).round()/100.0;if (cash_amount+mpesa_amount-refund).abs()>0.01{return Err(format!("Cash and M-Pesa refunds must add up exactly to {}.",refund));}
     if refund>0.0&&cash_amount+mpesa_amount<=0.0{return Err("Enter the refund payment amounts.".into());}
