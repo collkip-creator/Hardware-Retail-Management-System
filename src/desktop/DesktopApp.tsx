@@ -6,7 +6,8 @@ import InventoryWorkspace from './InventoryWorkspace';
 import SuppliersPurchasingWorkspace from './SuppliersPurchasingWorkspace';
 import CustomersWorkspace from './CustomersWorkspace';
 import AccountingWorkspace from './AccountingWorkspace';
-import ReportsWorkspace from './ReportsWorkspace';\nimport AuditTrailWorkspace from './AuditTrailWorkspace';
+import ReportsWorkspace from './ReportsWorkspace';
+import AuditTrailWorkspace from './AuditTrailWorkspace';
 
 type LocalStatus = { setupRequired: boolean; deviceId: string; staffCount: number; schemaVersion: number };
 type StaffSession = { staffId: string; username: string; displayName: string; role: string; branchId: string | null; mustChangePassword?: boolean };
