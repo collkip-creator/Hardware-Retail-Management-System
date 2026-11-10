@@ -1585,6 +1585,7 @@ fn get_master_catalogue_workspace(
         }))
     ).optional().map_err(|e| e.to_string())?;
     let version = release.as_ref().and_then(|r| r["version"].as_i64()).unwrap_or(0);
+    let synced_at = release.as_ref().and_then(|r| r["syncedAt"].as_str());
     let mut statement = connection.prepare(
         "SELECT id,category,product_family,name,specification,brand,sku,barcode,
                 stock_unit,purchase_unit,conversion_factor,description
@@ -1604,7 +1605,7 @@ fn get_master_catalogue_workspace(
         "conversionFactor":row.get::<_,f64>(10)?,
         "description":row.get::<_,Option<String>>(11)?
     }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"release":release,"items":items,"syncedAt":release.as_ref().and_then(|r|r["syncedAt"].as_str())}))
+    Ok(serde_json::json!({"release":release,"items":items,"syncedAt":synced_at}))
 }
 
 #[tauri::command]
@@ -1641,12 +1642,16 @@ async fn sync_master_catalogue(
     if version < 1 || items.is_empty() || items.len() > 500 {
         return Err("The central catalogue release is empty or exceeds the supported 500-product limit.".into());
     }
-    let synced_at = chrono_free_timestamp();
     let mut connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let synced_at: String = connection.query_row(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |row| row.get(0)
+    ).map_err(|e| e.to_string())?;
     let tx = connection.transaction().map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT OR REPLACE INTO master_catalogue_releases(version,release_id,status,item_count,published_at,synced_at)
-         VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO master_catalogue_releases(version,release_id,status,item_count,published_at,synced_at)
+         VALUES(?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(version) DO UPDATE SET release_id=excluded.release_id,status=excluded.status,
+         item_count=excluded.item_count,published_at=excluded.published_at,synced_at=excluded.synced_at",
         params![version,release_id,status_text,items.len() as i64,published_at,synced_at]
     ).map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM master_catalogue_items WHERE release_version=?1", [version])
@@ -1706,7 +1711,7 @@ fn adopt_master_catalogue_products(
     let mut seen = std::collections::HashSet::new();
     for master_id in master_product_ids {
         if !seen.insert(master_id.clone()) { skipped += 1; continue; }
-        let master: Option<(String,String,String,Option<String>,Option<String>,String,Option<String>,String,Option<String>,f64,Option<String>)> = tx.query_row(
+        let master: Option<(String,String,String,Option<String>,Option<String>,String,Option<String>,Option<String>,Option<String>,f64,Option<String>)> = tx.query_row(
             "SELECT category,name,sku,brand,specification,stock_unit,barcode,purchase_unit,description,conversion_factor,product_family
              FROM master_catalogue_items WHERE id=?1 AND release_version=?2",
             params![master_id,version],
@@ -1737,13 +1742,6 @@ fn adopt_master_catalogue_products(
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"added":added,"skipped":skipped,"version":version}))
-}
-
-fn chrono_free_timestamp() -> String {
-    // SQLite stores UTC timestamps consistently; this RFC3339 value is only metadata.
-    let now: std::time::SystemTime = std::time::SystemTime::now();
-    let seconds = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    format!("{}Z", seconds)
 }
 
 #[tauri::command]
