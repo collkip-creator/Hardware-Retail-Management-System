@@ -2185,6 +2185,69 @@ fn record_supplier_payment(database:tauri::State<'_,LocalDatabase>,actor_staff_i
 
 
 #[tauri::command]
+fn get_audit_trail(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+    start_date: String,
+    end_date: String,
+    branch_id: Option<String>,
+    event_type: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let start = start_date.trim();
+    let end = end_date.trim();
+    let valid_date = |v: &str| v.len() == 10 && v.chars().enumerate().all(|(i,c)| {
+        if [4,7].contains(&i) { c == '-' } else { c.is_ascii_digit() }
+    });
+    if !valid_date(start) || !valid_date(end) || start > end {
+        return Err("Choose a valid date range.".into());
+    }
+    let c = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    require_owner(&c, &actor_staff_id)?;
+    let business_id: String = c.query_row(
+        "SELECT business_id FROM staff_profiles WHERE id=?1 AND role='Business Owner' AND status='active'",
+        [&actor_staff_id], |r| r.get(0)
+    ).map_err(|e| e.to_string())?;
+    if let Some(ref bid) = branch_id {
+        let valid: i64 = c.query_row(
+            "SELECT COUNT(*) FROM branches WHERE id=?1 AND business_id=?2",
+            params![bid, business_id], |r| r.get(0)
+        ).map_err(|e| e.to_string())?;
+        if valid == 0 { return Err("The selected branch is not part of this business.".into()); }
+    }
+    let mut stmt = c.prepare(
+        "SELECT a.id, a.created_at, COALESCE(sp.display_name,'Former or unavailable staff'), 
+                a.event_type, COALESCE(a.entity_type,''), COALESCE(a.entity_id,''),
+                COALESCE(a.details_json,'{}'),
+                COALESCE(json_extract(a.details_json,'$.branchId'), CASE WHEN a.entity_type='branch' THEN a.entity_id ELSE NULL END),
+                COALESCE(b.name,'')
+         FROM audit_events a
+         JOIN staff_profiles owner_actor ON owner_actor.id=?1 AND owner_actor.business_id=?2
+         LEFT JOIN staff_profiles sp ON sp.id=a.actor_staff_id AND sp.business_id=?2
+         LEFT JOIN branches b ON b.id=COALESCE(json_extract(a.details_json,'$.branchId'), CASE WHEN a.entity_type='branch' THEN a.entity_id ELSE NULL END)
+         WHERE (sp.business_id=?2 OR (a.actor_staff_id IS NULL AND a.event_type LIKE 'SYSTEM_%'))
+           AND date(a.created_at) BETWEEN ?3 AND ?4
+           AND (?5 IS NULL OR COALESCE(json_extract(a.details_json,'$.branchId'), CASE WHEN a.entity_type='branch' THEN a.entity_id ELSE NULL END)=?5)
+           AND (?6 IS NULL OR a.event_type=?6)
+         ORDER BY a.created_at DESC LIMIT 2000"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![actor_staff_id,business_id,start,end,branch_id,event_type], |r| {
+        let details: String = r.get(6)?;
+        let parsed: serde_json::Value = serde_json::from_str(&details).unwrap_or(serde_json::json!({}));
+        Ok(serde_json::json!({
+            "id":r.get::<_,String>(0)?,"createdAt":r.get::<_,String>(1)?,
+            "staff":r.get::<_,String>(2)?,"eventType":r.get::<_,String>(3)?,
+            "entityType":r.get::<_,String>(4)?,"entityId":r.get::<_,String>(5)?,
+            "details":parsed,"branchId":r.get::<_,Option<String>>(7)?,
+            "branchName":r.get::<_,String>(8)?
+        }))
+    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+    let mut branch_stmt = c.prepare("SELECT id,name FROM branches WHERE business_id=?1 ORDER BY name").map_err(|e| e.to_string())?;
+    let branches = branch_stmt.query_map([business_id], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?})))
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"events":rows,"branches":branches,"limit":2000}))
+}
+
+#[tauri::command]
 fn get_management_reports(
     database: tauri::State<'_, LocalDatabase>,
     actor_staff_id: String,
@@ -2391,7 +2454,7 @@ pub fn run() {
             process_pos_return,
             close_pos_shift,
             get_pos_sales_history,
-            get_management_reports,
+            get_management_reports,\n            get_audit_trail,
             get_accounting_workspace,
             save_accounting_expense,
             save_accounting_cashbook,
