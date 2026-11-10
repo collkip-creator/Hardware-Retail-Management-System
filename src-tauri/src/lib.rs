@@ -1472,6 +1472,8 @@ fn post_local_journal(c:&Connection,business_id:&str,actor:&str,source_type:&str
     let credit=(lines.iter().map(|x|x.2).sum::<f64>()*100.0).round()/100.0;
     if lines.len()<2||debit<=0.0||(debit-credit).abs()>0.01{return Err("Accounting entry rejected: journal debits and credits must balance.".into());}
     let id=Uuid::new_v4().to_string();
+    c.execute("INSERT INTO journal_entries(id,business_id,source_type,source_id,source_key,reference,description,entry_date,total_debit,total_credit,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![id,business_id,source_type,source_id,source_key,reference,description,date,debit,credit,actor]).map_err(|e|e.to_string())?;
     for (code,dr,cr) in &lines {
         if !dr.is_finite()||!cr.is_finite()||*dr<0.0||*cr<0.0||(*dr>0.0&&*cr>0.0){return Err("Journal lines must contain a non-negative debit or credit, not both.".into());}
         let account:Option<(String,i64)>=c.query_row("SELECT name,active FROM accounting_accounts WHERE business_id=?1 AND code=?2",params![business_id,code],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
@@ -1480,8 +1482,6 @@ fn post_local_journal(c:&Connection,business_id:&str,actor:&str,source_type:&str
         c.execute("INSERT INTO journal_lines(id,journal_id,account_code,account_name,debit,credit) VALUES(?1,?2,?3,?4,?5,?6)",
             params![Uuid::new_v4().to_string(),id,code,name,dr,cr]).map_err(|e|e.to_string())?;
     }
-    c.execute("INSERT INTO journal_entries(id,business_id,source_type,source_id,source_key,reference,description,entry_date,total_debit,total_credit,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-        params![id,business_id,source_type,source_id,source_key,reference,description,date,debit,credit,actor]).map_err(|e|e.to_string())?;
     Ok(id)
 }
 #[tauri::command]
@@ -1528,7 +1528,7 @@ fn save_accounting_expense(database:tauri::State<'_,LocalDatabase>,actor_staff_i
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'ACCOUNTING_EXPENSE_POSTED','expense',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"amount":amount,"status":"POSTED"}))
 }
-fn chrono_free_today()->String{let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();let days=(now/86400) as i64;let z=days+719468;let era=if z>=0{z}else{z-146096}/146097;let doe=z-era*146097;let yoe=(doe-doe/1460+doe/36524-doe/146096)/365;let mut y=yoe+era*400;let doy=doe-(365*yoe+yoe/4-yoe/100);let mp=(5*doy+2)/153;let d=doy-(153*mp+2)/5+1;let m=mp+if mp<10{3}else{-9};if m<=2{y+=1;}format!("{:04}-{:02}-{:02}",y,m,d)}
+fn chrono_free_today()->String{let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();let days=(now/86400) as i64;let z=days+719468;let era=(if z>=0{z}else{z-146096})/146097;let doe=z-era*146097;let yoe=(doe-doe/1460+doe/36524-doe/146096)/365;let mut y=yoe+era*400;let doy=doe-(365*yoe+yoe/4-yoe/100);let mp=(5*doy+2)/153;let d=doy-(153*mp+2)/5+1;let m=mp+if mp<10{3}else{-9};if m<=2{y+=1;}format!("{:04}-{:02}-{:02}",y,m,d)}
 #[tauri::command]
 fn save_accounting_cashbook(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,direction:String,description:String,amount:f64,payment_method:String,account_code:String,reference:String,date:String)->Result<serde_json::Value,String>{
     let direction=direction.trim().to_uppercase();let method=payment_method.trim().to_uppercase();let code=account_code.trim();let description=description.trim();
