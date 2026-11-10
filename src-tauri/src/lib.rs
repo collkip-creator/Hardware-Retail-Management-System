@@ -315,7 +315,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         "INSERT OR IGNORE INTO devices(id, device_name) VALUES(?1, 'This computer')",
         [&device_id],
     ).map_err(|e| e.to_string())?;
-    connection.execute("UPDATE app_meta SET value='3' WHERE key='schema_version'", [])
+    connection.execute("UPDATE app_meta SET value='4' WHERE key='schema_version'", [])
         .map_err(|e| e.to_string())?;
     connection.execute_batch("UPDATE sales SET customer_id=(SELECT c.id FROM customers c JOIN branches b ON b.business_id=c.business_id WHERE b.id=sales.branch_id AND c.phone=sales.customer_phone LIMIT 1) WHERE customer_id IS NULL AND customer_phone IS NOT NULL AND trim(customer_phone)<>'';")
         .map_err(|e| e.to_string())?;
@@ -393,6 +393,40 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             payment_method TEXT NOT NULL, reference TEXT, description TEXT NOT NULL,
             source_type TEXT NOT NULL, source_id TEXT NOT NULL, actor_staff_id TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS accounting_accounts (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            code TEXT NOT NULL, name TEXT NOT NULL, account_type TEXT NOT NULL,
+            account_group TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+            is_system INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(business_id,code)
+        );
+        CREATE TABLE IF NOT EXISTS journal_entries (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            source_type TEXT NOT NULL, source_id TEXT NOT NULL, source_key TEXT NOT NULL,
+            reference TEXT NOT NULL, description TEXT NOT NULL, entry_date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'POSTED', total_debit REAL NOT NULL,
+            total_credit REAL NOT NULL, actor_staff_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(business_id,source_key)
+        );
+        CREATE TABLE IF NOT EXISTS journal_lines (
+            id TEXT PRIMARY KEY, journal_id TEXT NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+            account_code TEXT NOT NULL, account_name TEXT NOT NULL,
+            debit REAL NOT NULL DEFAULT 0, credit REAL NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_journal_business_date ON journal_entries(business_id,entry_date);
+        CREATE INDEX IF NOT EXISTS idx_journal_lines_journal ON journal_lines(journal_id);
+        CREATE TABLE IF NOT EXISTS accounting_expenses (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            description TEXT NOT NULL, amount REAL NOT NULL, account_code TEXT NOT NULL,
+            payment_method TEXT NOT NULL, reference TEXT, notes TEXT, entry_date TEXT NOT NULL,
+            actor_staff_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS accounting_cashbook (
+            id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
+            direction TEXT NOT NULL, description TEXT NOT NULL, amount REAL NOT NULL,
+            payment_method TEXT NOT NULL, account_code TEXT NOT NULL, reference TEXT,
+            entry_date TEXT NOT NULL, actor_staff_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     ").map_err(|e| e.to_string())?;
 
@@ -1406,6 +1440,131 @@ fn get_pos_sales_history(database:tauri::State<'_,LocalDatabase>,actor_staff_id:
 }
 
 
+
+fn accounting_default_accounts() -> Vec<(&'static str,&'static str,&'static str,&'static str)> {
+    vec![
+        ("1000","Cash on Hand","ASSET","Cash & cash equivalents"),("1010","M-Pesa Wallet","ASSET","Cash & cash equivalents"),
+        ("1020","Bank Account","ASSET","Cash & cash equivalents"),("1200","Inventory Asset","ASSET","Current assets"),
+        ("1300","Accounts Receivable","ASSET","Current assets"),("2000","Accounts Payable","LIABILITY","Current liabilities"),
+        ("2010","Customer Refunds Payable","LIABILITY","Current liabilities"),("3000","Owner Capital & Opening Balances","EQUITY","Equity"),
+        ("3100","Inventory Opening / Adjustment Clearing","EQUITY","Equity"),("4000","Sales Revenue","INCOME","Operating income"),
+        ("4010","Sales Returns & Allowances","EXPENSE","Contra revenue"),("4200","Other Business Income","INCOME","Other income"),
+        ("5000","Cost of Goods Sold","EXPENSE","Cost of sales"),("5100","Rent Expense","EXPENSE","Operating expenses"),
+        ("5110","Utilities Expense","EXPENSE","Operating expenses"),("5120","Salaries & Wages","EXPENSE","Operating expenses"),
+        ("5130","Transport & Delivery","EXPENSE","Operating expenses"),("5140","Repairs & Maintenance","EXPENSE","Operating expenses"),
+        ("5150","Licences & Permits","EXPENSE","Operating expenses"),("5160","Marketing & Advertising","EXPENSE","Operating expenses"),
+        ("5190","General Operating Expenses","EXPENSE","Operating expenses"),
+    ]
+}
+fn ensure_local_accounting_accounts(c:&Connection,business_id:&str)->Result<(),String>{
+    for (code,name,kind,group) in accounting_default_accounts(){
+        c.execute("INSERT OR IGNORE INTO accounting_accounts(id,business_id,code,name,account_type,account_group) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![Uuid::new_v4().to_string(),business_id,code,name,kind,group]).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+fn post_local_journal(c:&Connection,business_id:&str,actor:&str,source_type:&str,source_id:&str,reference:&str,description:&str,date:&str,lines:Vec<(String,f64,f64)>)->Result<String,String>{
+    let source_key=format!("{}:{}",source_type,source_id);
+    let existing:Option<String>=c.query_row("SELECT id FROM journal_entries WHERE business_id=?1 AND source_key=?2",params![business_id,source_key],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if let Some(id)=existing{return Ok(id);}
+    ensure_local_accounting_accounts(c,business_id)?;
+    let debit=(lines.iter().map(|x|x.1).sum::<f64>()*100.0).round()/100.0;
+    let credit=(lines.iter().map(|x|x.2).sum::<f64>()*100.0).round()/100.0;
+    if lines.len()<2||debit<=0.0||(debit-credit).abs()>0.01{return Err("Accounting entry rejected: journal debits and credits must balance.".into());}
+    let id=Uuid::new_v4().to_string();
+    for (code,dr,cr) in &lines {
+        if !dr.is_finite()||!cr.is_finite()||*dr<0.0||*cr<0.0||(*dr>0.0&&*cr>0.0){return Err("Journal lines must contain a non-negative debit or credit, not both.".into());}
+        let account:Option<(String,i64)>=c.query_row("SELECT name,active FROM accounting_accounts WHERE business_id=?1 AND code=?2",params![business_id,code],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+        let (name,active)=account.ok_or_else(||format!("Accounting account {} is not configured.",code))?;
+        if active!=1{return Err(format!("Accounting account {} is inactive.",code));}
+        c.execute("INSERT INTO journal_lines(id,journal_id,account_code,account_name,debit,credit) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![Uuid::new_v4().to_string(),id,code,name,dr,cr]).map_err(|e|e.to_string())?;
+    }
+    c.execute("INSERT INTO journal_entries(id,business_id,source_type,source_id,source_key,reference,description,entry_date,total_debit,total_credit,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![id,business_id,source_type,source_id,source_key,reference,description,date,debit,credit,actor]).map_err(|e|e.to_string())?;
+    Ok(id)
+}
+#[tauri::command]
+fn get_accounting_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String)->Result<serde_json::Value,String>{
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+    let (role,_branch,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Accountant"])?;
+    ensure_local_accounting_accounts(&c,&business)?;
+    let mut asmt=c.prepare("SELECT code,name,account_type,account_group,active,is_system FROM accounting_accounts WHERE business_id=?1 ORDER BY code").map_err(|e|e.to_string())?;
+    let accounts=asmt.query_map([&business],|r|Ok(serde_json::json!({"code":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"group":r.get::<_,String>(3)?,"active":r.get::<_,i64>(4)?==1,"system":r.get::<_,i64>(5)?==1}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut jstmt=c.prepare("SELECT id,source_type,source_id,reference,description,entry_date,total_debit,total_credit,created_at FROM journal_entries WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC LIMIT 200").map_err(|e|e.to_string())?;
+    let raw=jstmt.query_map([&business],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,f64>(6)?,r.get::<_,f64>(7)?,r.get::<_,String>(8)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut journals=Vec::new();
+    for (id,source_type,source_id,reference,description,date,total_debit,total_credit,created_at) in raw{
+        let mut ls=c.prepare("SELECT account_code,account_name,debit,credit FROM journal_lines WHERE journal_id=?1 ORDER BY rowid").map_err(|e|e.to_string())?;
+        let lines=ls.query_map([&id],|r|Ok(serde_json::json!({"accountCode":r.get::<_,String>(0)?,"accountName":r.get::<_,String>(1)?,"debit":r.get::<_,f64>(2)?,"credit":r.get::<_,f64>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        journals.push(serde_json::json!({"id":id,"sourceType":source_type,"sourceId":source_id,"reference":reference,"description":description,"date":date,"totalDebit":total_debit,"totalCredit":total_credit,"createdAt":created_at,"status":"POSTED","lines":lines}));
+    }
+    let mut totals:std::collections::HashMap<String,(f64,f64)>=std::collections::HashMap::new();
+    for journal in &journals{for line in journal["lines"].as_array().into_iter().flatten(){let code=line["accountCode"].as_str().unwrap_or_default().to_string();let x=totals.entry(code).or_insert((0.0,0.0));x.0+=line["debit"].as_f64().unwrap_or(0.0);x.1+=line["credit"].as_f64().unwrap_or(0.0);}}
+    let trial:Vec<serde_json::Value>=accounts.iter().map(|a|{
+        let (dr,cr)=totals.get(a["code"].as_str().unwrap_or_default()).copied().unwrap_or((0.0,0.0));
+        serde_json::json!({"code":a["code"],"name":a["name"],"type":a["type"],"group":a["group"],"active":a["active"],"debitTotal":dr,"creditTotal":cr,"debitBalance":(dr-cr).max(0.0),"creditBalance":(cr-dr).max(0.0)})
+    }).collect();
+    let amount_for=|kind:&str|trial.iter().filter(|a|a["type"]==kind).map(|a|if kind=="ASSET"||kind=="EXPENSE"{a["debitBalance"].as_f64().unwrap_or(0.0)-a["creditBalance"].as_f64().unwrap_or(0.0)}else{a["creditBalance"].as_f64().unwrap_or(0.0)-a["debitBalance"].as_f64().unwrap_or(0.0)}).sum::<f64>();
+    let income=amount_for("INCOME");let expenses=amount_for("EXPENSE");let assets=amount_for("ASSET");let liabilities=amount_for("LIABILITY");let equity=amount_for("EQUITY");
+    let cash_balance=["1000","1010","1020"].iter().map(|code|trial.iter().find(|a|a["code"]==*code).map(|a|a["debitBalance"].as_f64().unwrap_or(0.0)-a["creditBalance"].as_f64().unwrap_or(0.0)).unwrap_or(0.0)).sum::<f64>();
+    let opening=journals.iter().find(|j|j["sourceType"]=="OPENING_BALANCE").cloned();
+    let mut expenses_stmt=c.prepare("SELECT id,description,amount,account_code,payment_method,COALESCE(reference,''),entry_date,COALESCE(notes,''),created_at FROM accounting_expenses WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let expenses_rows=expenses_stmt.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"description":r.get::<_,String>(1)?,"amount":r.get::<_,f64>(2)?,"accountCode":r.get::<_,String>(3)?,"paymentMethod":r.get::<_,String>(4)?,"reference":r.get::<_,String>(5)?,"date":r.get::<_,String>(6)?,"notes":r.get::<_,String>(7)?,"createdAt":r.get::<_,String>(8)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let mut cash_stmt=c.prepare("SELECT id,direction,description,amount,payment_method,account_code,COALESCE(reference,''),entry_date,created_at FROM accounting_cashbook WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let cash_rows=cash_stmt.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"direction":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"amount":r.get::<_,f64>(3)?,"paymentMethod":r.get::<_,String>(4)?,"accountCode":r.get::<_,String>(5)?,"reference":r.get::<_,String>(6)?,"date":r.get::<_,String>(7)?,"createdAt":r.get::<_,String>(8)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    Ok(serde_json::json!({"role":role,"accounts":accounts,"journals":journals,"trialBalance":trial,"profitAndLoss":{"income":income,"expenses":expenses,"netProfit":income-expenses},"balanceSheet":{"assets":assets,"liabilities":liabilities,"equity":equity+income-expenses},"cashbook":{"cashBalance":cash_balance},"openingBalance":opening,"postedJournalCount":journals.len(),"expenses":expenses_rows,"cashbookEntries":cash_rows}))
+}
+#[tauri::command]
+fn save_accounting_expense(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,description:String,amount:f64,account_code:String,payment_method:String,reference:String,notes:String,date:String)->Result<serde_json::Value,String>{
+    let description=description.trim();let method=payment_method.trim().to_uppercase();let code=account_code.trim();
+    if description.is_empty()||description.len()>180||!amount.is_finite()||amount<=0.0||!["5100","5110","5120","5130","5140","5150","5160","5190"].contains(&code)||!["CASH","MPESA","BANK"].contains(&method.as_str()){return Err("Enter a description, positive amount, expense category and valid payment account.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Accountant"])?;
+    let amount=(amount*100.0).round()/100.0;let id=Uuid::new_v4().to_string();let date=if date.trim().is_empty(){chrono_free_today()}else{date};
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO accounting_expenses(id,business_id,description,amount,account_code,payment_method,reference,notes,entry_date,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,business,description,amount,code,method,reference.trim(),notes.trim(),date,actor_staff_id]).map_err(|e|e.to_string())?;
+    let cash=match method.as_str(){"CASH"=>"1000","MPESA"=>"1010",_=>"1020"};
+    post_local_journal(&tx,&business,&actor_staff_id,"EXPENSE",&id,if reference.trim().is_empty(){&id}else{reference.trim()},&format!("Expense: {}",description),&date,vec![(code.to_string(),amount,0.0),(cash.to_string(),0.0,amount)])?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'ACCOUNTING_EXPENSE_POSTED','expense',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"amount":amount,"status":"POSTED"}))
+}
+fn chrono_free_today()->String{let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();let days=(now/86400) as i64;let z=days+719468;let era=if z>=0{z}else{z-146096}/146097;let doe=z-era*146097;let yoe=(doe-doe/1460+doe/36524-doe/146096)/365;let mut y=yoe+era*400;let doy=doe-(365*yoe+yoe/4-yoe/100);let mp=(5*doy+2)/153;let d=doy-(153*mp+2)/5+1;let m=mp+if mp<10{3}else{-9};if m<=2{y+=1;}format!("{:04}-{:02}-{:02}",y,m,d)}
+#[tauri::command]
+fn save_accounting_cashbook(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,direction:String,description:String,amount:f64,payment_method:String,account_code:String,reference:String,date:String)->Result<serde_json::Value,String>{
+    let direction=direction.trim().to_uppercase();let method=payment_method.trim().to_uppercase();let code=account_code.trim();let description=description.trim();
+    if !["RECEIPT","PAYMENT"].contains(&direction.as_str())||description.is_empty()||description.len()>180||!amount.is_finite()||amount<=0.0||!["CASH","MPESA","BANK"].contains(&method.as_str()){return Err("Enter a valid cashbook direction, description, amount and payment account.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Accountant"])?;
+    let cash=match method.as_str(){"CASH"=>"1000","MPESA"=>"1010",_=>"1020"};
+    ensure_local_accounting_accounts(&c,&business)?;
+    let valid:i64=c.query_row("SELECT COUNT(*) FROM accounting_accounts WHERE business_id=?1 AND code=?2 AND active=1 AND code NOT IN ('1000','1010','1020')",params![business,code],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if valid==0{return Err("Select an active offset account different from the cash/bank account.".into());}
+    let amount=(amount*100.0).round()/100.0;let id=Uuid::new_v4().to_string();let date=if date.trim().is_empty(){chrono_free_today()}else{date};
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO accounting_cashbook(id,business_id,direction,description,amount,payment_method,account_code,reference,entry_date,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,business,direction,description,amount,method,code,reference.trim(),date,actor_staff_id]).map_err(|e|e.to_string())?;
+    let lines=if direction=="RECEIPT"{vec![(cash.to_string(),amount,0.0),(code.to_string(),0.0,amount)]}else{vec![(code.to_string(),amount,0.0),(cash.to_string(),0.0,amount)]};
+    post_local_journal(&tx,&business,&actor_staff_id,"CASHBOOK",&id,if reference.trim().is_empty(){&id}else{reference.trim()},&format!("Cashbook {}: {}",direction.to_lowercase(),description),&date,lines)?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'ACCOUNTING_CASHBOOK_POSTED','cashbook',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"amount":amount,"status":"POSTED"}))
+}
+#[tauri::command]
+fn post_accounting_opening_balances(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,effective_date:String,balances:Vec<serde_json::Value>)->Result<serde_json::Value,String>{
+    let date=effective_date.trim();if date.len()!=10||date.chars().nth(4)!=Some('-')||date.chars().nth(7)!=Some('-'){return Err("Enter a valid opening balance date.".into());}
+    if balances.is_empty(){return Err("Enter at least one opening balance.".into());}
+    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Accountant"])?;
+    ensure_local_accounting_accounts(&c,&business)?;
+    let exists:i64=c.query_row("SELECT COUNT(*) FROM journal_entries WHERE business_id=?1 AND source_type='OPENING_BALANCE'",[&business],|r|r.get(0)).map_err(|e|e.to_string())?;if exists>0{return Err("Opening balances have already been posted. Contact an authorised accountant for a correction journal.".into());}
+    let mut seen=std::collections::HashSet::new();let mut lines=Vec::new();let(mut assets,mut liabilities)=(0.0,0.0);
+    for row in balances{let code=row["accountCode"].as_str().unwrap_or_default().to_string();let amount=row["amount"].as_f64().or_else(||row["amount"].as_str().and_then(|x|x.parse().ok())).unwrap_or(-1.0);if !seen.insert(code.clone())||!amount.is_finite()||amount<0.0{return Err("Each opening balance must have a unique account and non-negative amount.".into());}if amount==0.0{continue;}
+        let kind:Option<String>=c.query_row("SELECT account_type FROM accounting_accounts WHERE business_id=?1 AND code=?2 AND active=1",params![business,code],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        match kind.as_deref(){Some("ASSET")=>{assets+=amount;lines.push((code,amount,0.0));},Some("LIABILITY")=>{liabilities+=amount;lines.push((code,0.0,amount));},_=>return Err("Opening balances can only be entered for active asset and liability accounts.".into())}
+    }
+    let equity=((assets-liabilities)*100.0).round()/100.0;if equity>0.0{lines.push(("3000".into(),0.0,equity));}else if equity<0.0{lines.push(("3000".into(),equity.abs(),0.0));}
+    if lines.is_empty(){return Err("Enter at least one non-zero asset or liability balance.".into());}
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;let id=post_local_journal(&tx,&business,&actor_staff_id,"OPENING_BALANCE","initial",&format!("OPENING-{}",date.replace("-","")),&format!("Business opening balances as at {}",date),date,lines)?;
+    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'ACCOUNTING_OPENING_BALANCES_POSTED','journal_entry',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"status":"POSTED"}))
+}
+
 fn inventory_actor_role(c: &Connection, actor_id: &str, allowed: &[&str]) -> Result<String, String> {
     let role: Option<String> = c.query_row(
         "SELECT role FROM staff_profiles WHERE id=?1 AND status='active'", [actor_id], |r| r.get(0)
@@ -2039,6 +2198,10 @@ pub fn run() {
             process_pos_return,
             close_pos_shift,
             get_pos_sales_history,
+            get_accounting_workspace,
+            save_accounting_expense,
+            save_accounting_cashbook,
+            post_accounting_opening_balances,
             get_inventory_workspace,
             save_reorder_level,
             adjust_inventory_stock,
