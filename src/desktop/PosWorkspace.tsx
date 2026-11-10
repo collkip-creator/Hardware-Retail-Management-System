@@ -114,7 +114,7 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
         paymentMethod:method,cashAmount:Number(cashAmount||0),mpesaAmount:Number(mpesaAmount||0),paymentReference:paymentReference||null,
         customerId:customerId||null,customerName:customerName||null,customerPhone:customerPhone||null
       });
-      setReceipt(result);setBasket([]);setOrderDiscountPercent('0');setCashAmount('');setMpesaAmount('');setPaymentReference('');setCustomerId('');setCustomerName('');setCustomerPhone('');setApproverUsername('');setApproverPassword('');
+      setReceipt({...result,cashAmount:Number(cashAmount||0),mpesaAmount:Number(mpesaAmount||0),paymentReference:paymentReference||''});setBasket([]);setOrderDiscountPercent('0');setCashAmount('');setMpesaAmount('');setPaymentReference('');setCustomerId('');setCustomerName('');setCustomerPhone('');setApproverUsername('');setApproverPassword('');
     },'Sale completed and stock deducted.');
   }
 
