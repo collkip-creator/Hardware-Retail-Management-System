@@ -1303,7 +1303,8 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     }
     subtotal=(subtotal*100.0).round()/100.0;eligible_total=(eligible_total*100.0).round()/100.0;
     let order_discount=(eligible_total*order_pct/100.0*100.0).round()/100.0;let mut discount_total=0.0f64;
-    for line in &mut lines{let share=if eligible_total>0.0{(line["eligibleTotal"].as_f64().unwrap_or(0.0)/eligible_total*order_discount*100.0).round()/100.0}else{0.0};let discount=line["lineDiscount"].as_f64().unwrap_or(0.0)+share;let net=(line["grossTotal"].as_f64().unwrap_or(0.0)-discount).max(0.0);line["discountAmount"]=serde_json::json!(discount);line["netLineTotal"]=serde_json::json!(net);discount_total+=discount;}
+    let line_count=lines.len();let mut allocated_order_discount=0.0f64;
+    for (index,line) in lines.iter_mut().enumerate(){let share=if index+1==line_count{(order_discount-allocated_order_discount).max(0.0)}else if eligible_total>0.0{(line["eligibleTotal"].as_f64().unwrap_or(0.0)/eligible_total*order_discount*100.0).round()/100.0}else{0.0};allocated_order_discount+=share;let discount=line["lineDiscount"].as_f64().unwrap_or(0.0)+share;let net=(line["grossTotal"].as_f64().unwrap_or(0.0)-discount).max(0.0);line["discountAmount"]=serde_json::json!(discount);line["netLineTotal"]=serde_json::json!(net);discount_total+=discount;}
     discount_total=(discount_total*100.0).round()/100.0;let total=(subtotal-discount_total).max(0.0);
     let approver=if has_discount{Some(pos_approval_actor(&tx,&actor_staff_id,&branch_id,approver_username.as_deref(),approver_password.as_deref())?)}else{None};
     let receipt=format!("HR-{}",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>().to_uppercase());let sale_id=Uuid::new_v4().to_string();
