@@ -15,6 +15,7 @@ on:
       - feature/pos-discounts-returns
       - feature/accounting-desktop-phase
       - feature/reports-management-phase6
+      - feature/integration-testing-phase7
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
