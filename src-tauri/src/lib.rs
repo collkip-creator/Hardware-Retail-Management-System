@@ -225,6 +225,47 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             connection.execute_batch(&format!("ALTER TABLE products ADD COLUMN {column} {definition};")).map_err(|e| e.to_string())?;
         }
     }
+    for (column, definition) in [
+        ("master_product_id", "TEXT"),
+        ("master_catalogue_version", "INTEGER"),
+    ] {
+        if !has_column(connection, "products", column)? {
+            connection.execute_batch(&format!("ALTER TABLE products ADD COLUMN {column} {definition};"))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    connection.execute_batch("
+        CREATE TABLE IF NOT EXISTS master_catalogue_releases (
+            version INTEGER PRIMARY KEY,
+            release_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            published_at TEXT,
+            synced_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS master_catalogue_items (
+            id TEXT PRIMARY KEY,
+            release_version INTEGER NOT NULL REFERENCES master_catalogue_releases(version),
+            category TEXT NOT NULL,
+            product_family TEXT,
+            name TEXT NOT NULL,
+            specification TEXT,
+            brand TEXT,
+            sku TEXT NOT NULL,
+            barcode TEXT,
+            stock_unit TEXT NOT NULL,
+            purchase_unit TEXT,
+            conversion_factor REAL NOT NULL DEFAULT 1,
+            description TEXT,
+            UNIQUE(release_version, sku)
+        );
+        CREATE INDEX IF NOT EXISTS idx_master_catalogue_category_name
+            ON master_catalogue_items(release_version, category, name);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_products_master_product
+            ON products(business_id, master_product_id)
+            WHERE master_product_id IS NOT NULL;
+    ").map_err(|e| e.to_string())?;
+
     if !has_column(connection, "staff_accounts", "must_change_password")? {
         connection.execute_batch("ALTER TABLE staff_accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;").map_err(|e| e.to_string())?;
     }
@@ -1512,6 +1553,199 @@ fn get_catalogue_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_i
  Ok(serde_json::json!({"role":role,"assignedBranchId":assigned,"branches":branches,"products":products,"stock":stock,"receipts":receipts,"warehouses":warehouses}))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MasterCatalogueSyncResult {
+    version: i64,
+    item_count: usize,
+    synced_at: String,
+}
+
+#[tauri::command]
+fn get_master_catalogue_workspace(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+) -> Result<serde_json::Value, String> {
+    let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let role: Option<String> = connection.query_row(
+        "SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",
+        [&actor_staff_id], |row| row.get(0)
+    ).optional().map_err(|e| e.to_string())?;
+    if role.is_none() { return Err("Your staff account is inactive.".into()); }
+    let release: Option<serde_json::Value> = connection.query_row(
+        "SELECT version,release_id,status,item_count,published_at,synced_at
+         FROM master_catalogue_releases ORDER BY version DESC LIMIT 1",
+        [], |row| Ok(serde_json::json!({
+            "version": row.get::<_,i64>(0)?,
+            "id": row.get::<_,String>(1)?,
+            "status": row.get::<_,String>(2)?,
+            "itemCount": row.get::<_,i64>(3)?,
+            "publishedAt": row.get::<_,Option<String>>(4)?,
+            "syncedAt": row.get::<_,String>(5)?
+        }))
+    ).optional().map_err(|e| e.to_string())?;
+    let version = release.as_ref().and_then(|r| r["version"].as_i64()).unwrap_or(0);
+    let mut statement = connection.prepare(
+        "SELECT id,category,product_family,name,specification,brand,sku,barcode,
+                stock_unit,purchase_unit,conversion_factor,description
+         FROM master_catalogue_items WHERE release_version=?1 ORDER BY category,name"
+    ).map_err(|e| e.to_string())?;
+    let items = statement.query_map([version], |row| Ok(serde_json::json!({
+        "id":row.get::<_,String>(0)?,
+        "category":row.get::<_,String>(1)?,
+        "productFamily":row.get::<_,Option<String>>(2)?,
+        "name":row.get::<_,String>(3)?,
+        "specification":row.get::<_,Option<String>>(4)?,
+        "brand":row.get::<_,Option<String>>(5)?,
+        "sku":row.get::<_,String>(6)?,
+        "barcode":row.get::<_,Option<String>>(7)?,
+        "stockUnit":row.get::<_,String>(8)?,
+        "purchaseUnit":row.get::<_,Option<String>>(9)?,
+        "conversionFactor":row.get::<_,f64>(10)?,
+        "description":row.get::<_,Option<String>>(11)?
+    }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"release":release,"items":items,"syncedAt":release.as_ref().and_then(|r|r["syncedAt"].as_str())}))
+}
+
+#[tauri::command]
+async fn sync_master_catalogue(
+    database: tauri::State<'_, LocalDatabase>,
+) -> Result<MasterCatalogueSyncResult, String> {
+    let token = {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        read_sync_value(&connection, "device_token")?
+            .ok_or_else(|| "Pair this computer with the business before downloading the central catalogue.".to_string())?
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build().map_err(|e| format!("Could not initialise the catalogue connection: {e}"))?;
+    let response = client.get(format!("{DESKTOP_API_BASE}/desktop/master-catalogue/current"))
+        .bearer_auth(&token).send().await
+        .map_err(|e| format!("Could not reach the central product catalogue. Check the internet connection. Details: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await
+        .map_err(|e| format!("The central catalogue returned an unreadable response: {e}"))?;
+    if !status.is_success() {
+        return Err(body.get("error").and_then(|v|v.as_str())
+            .unwrap_or("The central catalogue could not be downloaded.").to_string());
+    }
+    let release = body.get("release").filter(|v| !v.is_null())
+        .ok_or_else(|| "No published central catalogue release is available yet.".to_string())?;
+    let version = release.get("version").and_then(|v|v.as_i64())
+        .ok_or_else(|| "The central catalogue release has no valid version.".to_string())?;
+    let release_id = release.get("id").and_then(|v|v.as_str()).unwrap_or("").to_string();
+    let status_text = release.get("status").and_then(|v|v.as_str()).unwrap_or("PUBLISHED").to_string();
+    let published_at = release.get("publishedAt").and_then(|v|v.as_str()).map(str::to_string);
+    let items = body.get("items").and_then(|v|v.as_array())
+        .ok_or_else(|| "The central catalogue response contains no product list.".to_string())?;
+    if version < 1 || items.is_empty() || items.len() > 500 {
+        return Err("The central catalogue release is empty or exceeds the supported 500-product limit.".into());
+    }
+    let synced_at = chrono_free_timestamp();
+    let mut connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT OR REPLACE INTO master_catalogue_releases(version,release_id,status,item_count,published_at,synced_at)
+         VALUES(?1,?2,?3,?4,?5,?6)",
+        params![version,release_id,status_text,items.len() as i64,published_at,synced_at]
+    ).map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM master_catalogue_items WHERE release_version=?1", [version])
+        .map_err(|e| e.to_string())?;
+    for item in items {
+        let id = item.get("id").and_then(|v|v.as_str()).filter(|v|!v.is_empty())
+            .map(str::to_string).unwrap_or_else(||Uuid::new_v4().to_string());
+        let category = item.get("category").and_then(|v|v.as_str()).unwrap_or("").trim();
+        let name = item.get("name").and_then(|v|v.as_str()).unwrap_or("").trim();
+        let sku = item.get("sku").and_then(|v|v.as_str()).unwrap_or("").trim();
+        let stock_unit = item.get("stockUnit").and_then(|v|v.as_str()).unwrap_or("").trim();
+        if category.is_empty() || name.is_empty() || sku.is_empty() || stock_unit.is_empty() {
+            return Err("The central catalogue contains a product with missing required fields. The local cache was not changed.".into());
+        }
+        let optional = |key: &str| item.get(key).and_then(|v|v.as_str()).map(str::to_string);
+        let factor = item.get("conversionFactor").and_then(|v|v.as_f64()).unwrap_or(1.0);
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(format!("The central catalogue has an invalid purchase conversion for SKU {sku}."));
+        }
+        tx.execute(
+            "INSERT INTO master_catalogue_items(id,release_version,category,product_family,name,specification,brand,sku,barcode,stock_unit,purchase_unit,conversion_factor,description)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![id,version,category,optional("productFamily"),name,optional("specification"),optional("brand"),sku,optional("barcode"),stock_unit,optional("purchaseUnit"),factor,optional("description")]
+        ).map_err(|e| format!("Could not cache master catalogue SKU {sku}: {e}"))?;
+    }
+    write_sync_value(&tx, "master_catalogue_version", &version.to_string())?;
+    write_sync_value(&tx, "master_catalogue_synced_at", &synced_at)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(MasterCatalogueSyncResult { version, item_count: items.len(), synced_at })
+}
+
+#[tauri::command]
+fn adopt_master_catalogue_products(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+    master_product_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if master_product_ids.is_empty() || master_product_ids.len() > 500 {
+        return Err("Select between 1 and 500 central catalogue products.".into());
+    }
+    let mut connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let actor: Option<(String,String)> = connection.query_row(
+        "SELECT role,business_id FROM staff_profiles WHERE id=?1 AND status='active'",
+        [&actor_staff_id], |row| Ok((row.get(0)?,row.get(1)?))
+    ).optional().map_err(|e| e.to_string())?;
+    let (role,business_id) = actor.ok_or_else(|| "Your staff account is inactive.".to_string())?;
+    if !matches!(role.as_str(),"Business Owner"|"Storekeeper"|"Manager") {
+        return Err("Your role cannot add products from the central catalogue.".into());
+    }
+    let version: i64 = connection.query_row(
+        "SELECT MAX(version) FROM master_catalogue_releases WHERE status='PUBLISHED'",
+        [], |row| row.get::<_,Option<i64>>(0)
+    ).map_err(|e| e.to_string())?.ok_or_else(|| "Download the central catalogue before selecting products.".to_string())?;
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for master_id in master_product_ids {
+        if !seen.insert(master_id.clone()) { skipped += 1; continue; }
+        let master: Option<(String,String,String,Option<String>,Option<String>,String,Option<String>,String,Option<String>,f64,Option<String>)> = tx.query_row(
+            "SELECT category,name,sku,brand,specification,stock_unit,barcode,purchase_unit,description,conversion_factor,product_family
+             FROM master_catalogue_items WHERE id=?1 AND release_version=?2",
+            params![master_id,version],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?))
+        ).optional().map_err(|e| e.to_string())?;
+        let Some((category,name,sku,brand,specification,unit,barcode,purchase_unit,_description,factor,_family)) = master else {
+            skipped += 1; continue;
+        };
+        let duplicate: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM products WHERE business_id=?1 AND (sku=?2 OR
+             (lower(name)=lower(?3) AND category=?4 AND lower(COALESCE(variant,''))=lower(COALESCE(?5,''))))",
+            params![business_id,sku,name,category,specification],
+            |r| r.get(0)
+        ).map_err(|e| e.to_string())?;
+        if duplicate > 0 { skipped += 1; continue; }
+        let product_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO products(id,business_id,name,sku,unit,buying_price,selling_price,category,brand,variant,purchase_unit,conversion_factor,barcode,reorder_level,tax_category,master_product_id,master_catalogue_version)
+             VALUES(?1,?2,?3,?4,?5,0,0,?6,?7,?8,?9,?10,?11,0,'STANDARD',?12,?13)",
+            params![product_id,business_id,name,sku,unit,category,brand,specification,purchase_unit.unwrap_or_else(||unit.clone()),factor,barcode,master_id,version]
+        ).map_err(|e| if e.to_string().contains("UNIQUE") { "A selected product conflicts with an existing business SKU.".to_string() } else { e.to_string() })?;
+        tx.execute(
+            "INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id,details_json)
+             VALUES(?1,?2,'MASTER_CATALOGUE_PRODUCT_ADOPTED','product',?3,?4)",
+            params![Uuid::new_v4().to_string(),actor_staff_id,product_id,serde_json::json!({"masterProductId":master_id,"version":version,"sku":sku}).to_string()]
+        ).map_err(|e| e.to_string())?;
+        added += 1;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"added":added,"skipped":skipped,"version":version}))
+}
+
+fn chrono_free_timestamp() -> String {
+    // SQLite stores UTC timestamps consistently; this RFC3339 value is only metadata.
+    let now: std::time::SystemTime = std::time::SystemTime::now();
+    let seconds = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    format!("{}Z", seconds)
+}
+
 #[tauri::command]
 fn save_catalogue_product(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,id:Option<String>,name:String,sku:String,unit:String,buying_price:f64,selling_price:f64,category:String,brand:Option<String>,variant:Option<String>,purchase_unit:Option<String>,conversion_factor:f64,barcode:Option<String>,reorder_level:f64,tax_category:String)->Result<serde_json::Value,String>{
  let name=name.trim();let sku=sku.trim().to_uppercase();let unit=unit.trim();let category=category.trim();
@@ -1706,6 +1940,9 @@ pub fn run() {
             sync_desktop_workspace,
             get_pos_workspace,
             get_catalogue_workspace,
+            get_master_catalogue_workspace,
+            sync_master_catalogue,
+            adopt_master_catalogue_products,
             get_procurement_workspace,
             get_customers_workspace,
             save_customer,
