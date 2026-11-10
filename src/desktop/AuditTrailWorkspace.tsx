@@ -13,7 +13,14 @@ const today = () => new Date().toISOString().slice(0, 10);
 const firstDay = () => new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
 const readable = (value: string) => value.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 const detailText = (details: Record<string, unknown>) => Object.entries(details)
-  .map(([key, value]) => key + ': ' + (typeof value === 'object' ? JSON.stringify(value) : String(value)))
+  .filter(([key]) => key !== 'approvedByName')
+  .map(([key, value]) => {
+    const label = key === 'approvedBy' ? 'Approved by' : readable(key);
+    const display = key === 'approvedBy' && typeof details.approvedByName === 'string'
+      ? details.approvedByName
+      : value;
+    return label + ': ' + (typeof display === 'object' ? JSON.stringify(display) : String(display));
+  })
   .join(' · ');
 
 export default function AuditTrailWorkspace({ actorStaffId }: { actorStaffId: string }) {
