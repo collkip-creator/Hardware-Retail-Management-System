@@ -12,6 +12,7 @@ on:
       - feature/customers-desktop-phase
       - feature/pos-desktop-phase
       - feature/master-catalogue-desktop
+      - feature/pos-discounts-returns
     paths:
       - "src/desktop/**"
       - "src-tauri/**"
