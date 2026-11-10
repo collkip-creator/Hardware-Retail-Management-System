@@ -202,6 +202,43 @@ export default function PosWorkspace({ session, onSignOut }: { session: Session;
     </section>}
     {shift&&<form className="content-card" onSubmit={closeShift}><div className="section-heading"><div><h3>Close cashier shift</h3><p>Count the physical cash and confirm the M-Pesa total before closing.</p></div></div><div className="pos-two"><label>Closing cash counted<input type="number" min="0" step="0.01" value={closingCash} onChange={e=>setClosingCash(e.target.value)} required/></label><label>Closing M-Pesa total<input type="number" min="0" step="0.01" value={closingMpesa} onChange={e=>setClosingMpesa(e.target.value)} required/></label></div><button className="secondary" disabled={busy}>Close shift & reconcile</button></form>}
     {reconciliation&&<section className="content-card"><div className="section-heading"><div><h3>Last shift reconciliation</h3><p>Variance = amount counted minus expected amount.</p></div></div><div className="ledger-row"><span>Opening float</span><strong>{money(reconciliation.openingFloat)}</strong></div><div className="ledger-row"><span>Cash sales</span><strong>{money(reconciliation.cashSales)}</strong></div><div className="ledger-row"><span>M-Pesa sales</span><strong>{money(reconciliation.mpesaSales)}</strong></div><div className="ledger-row"><span>Cash variance</span><strong>{money(reconciliation.cashVariance)}</strong></div><div className="ledger-row"><span>M-Pesa variance</span><strong>{money(reconciliation.mpesaVariance)}</strong></div></section>}
-    {receipt&&<section className="receipt-panel"><div><strong>Sale completed</strong><span>{receipt.receiptNumber}{receipt.customerName?' · '+receipt.customerName:''}</span></div><strong>Total: {money(Number(receipt.total))}</strong><button className="secondary" onClick={()=>setReceipt(null)}>Dismiss</button></section>}
+    {receipt&&<section className="receipt-panel">
+      <div><strong>Sale completed</strong><span>{receipt.receiptNumber}{receipt.customerName?' · '+receipt.customerName:''}</span></div>
+      <strong>Total: {money(Number(receipt.total))}</strong>
+      <div className="pos-two"><button type="button" className="primary" onClick={()=>window.print()}>Print receipt</button><button type="button" className="secondary" onClick={()=>setReceipt(null)}>Dismiss</button></div>
+    </section>}
+    {receipt&&<section className="receipt-print-area" aria-label="Printable sales receipt">
+      <header><h1>SALES RECEIPT</h1><p><strong>{receipt.receiptNumber}</strong></p></header>
+      <p>Branch: {workspace.branches.find(b=>b.id===branchId)?.name||'—'}</p>
+      <p>Date: {new Date().toLocaleString()}</p>
+      <p>Cashier: {session.displayName}</p>
+      <p>Customer: {receipt.customerName||'Walk-in customer'}{receipt.customerPhone?' · '+receipt.customerPhone:''}</p>
+      <hr/>
+      <table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>
+        {(receipt.items||[]).map((item:any,index:number)=><tr key={item.productId||index}><td>{item.name}</td><td>{item.quantity}</td><td>{money(Number(item.unitPrice))}</td><td>{money(Number(item.netLineTotal))}</td></tr>)}
+      </tbody></table>
+      <hr/>
+      <p>Subtotal: <strong>{money(Number(receipt.subtotal))}</strong></p>
+      <p>Discount: <strong>{money(Number(receipt.discountAmount))}</strong></p>
+      <h2>AMOUNT PAID: {money(Number(receipt.total))}</h2>
+      <p>Payment: {receipt.paymentMethod}</p>
+      {receipt.cashAmount>0&&<p>Cash: {money(Number(receipt.cashAmount))}</p>}
+      {receipt.mpesaAmount>0&&<p>M-Pesa: {money(Number(receipt.mpesaAmount))}</p>}
+      {receipt.paymentReference&&<p>M-Pesa Ref: {receipt.paymentReference}</p>}
+      <footer><p>Thank you for your business!</p></footer>
+    </section>}
+    <style>{`
+      .receipt-print-area{display:none}
+      @media print{
+        @page{size:80mm auto;margin:4mm}
+        body *{visibility:hidden!important}
+        .receipt-print-area,.receipt-print-area *{visibility:visible!important}
+        .receipt-print-area{display:block!important;position:absolute!important;left:0!important;top:0!important;width:72mm!important;padding:2mm!important;background:#fff!important;color:#000!important;font:10pt/1.35 Arial,sans-serif!important}
+        .receipt-print-area h1,.receipt-print-area h2{text-align:center;font-size:13pt}
+        .receipt-print-area table{width:100%;border-collapse:collapse;font-size:9pt}
+        .receipt-print-area th,.receipt-print-area td{text-align:left;padding:2px 1px;border-bottom:1px solid #ddd}
+        .receipt-print-area p{margin:4px 0}
+      }
+    `}</style>
   </div>;
 }
