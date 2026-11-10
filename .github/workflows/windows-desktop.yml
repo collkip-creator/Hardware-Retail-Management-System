@@ -53,6 +53,9 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm install
 
+      - name: Run Rust backend unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Build Tauri Windows installer (retry transient NSIS download failures)
         shell: pwsh
         run: |
