@@ -1,0 +1,66 @@
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+type Session={staffId:string;role:string;displayName:string};
+type Account={code:string;name:string;type:string;group:string;active:boolean};
+type Line={accountCode:string;accountName:string;debit:number;credit:number};
+type Journal={id:string;sourceType:string;reference:string;description:string;date:string;totalDebit:number;lines:Line[]};
+type Data={accounts:Account[];journals:Journal[];trialBalance:(Account&{debitBalance:number;creditBalance:number})[];profitAndLoss:{income:number;expenses:number;netProfit:number};balanceSheet:{assets:number;liabilities:number;equity:number};cashbook:{cashBalance:number};openingBalance:Journal|null;postedJournalCount:number;expenses:any[];cashbookEntries:any[]};
+const today=()=>new Date().toISOString().slice(0,10);
+const money=(v:number)=>new Intl.NumberFormat('en-KE',{style:'currency',currency:'KES',maximumFractionDigits:2}).format(Number(v||0));
+export default function AccountingWorkspace({session}:{session:Session}){
+ const [data,setData]=useState<Data|null>(null),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
+ const [openingDate,setOpeningDate]=useState(today()),[opening,setOpening]=useState<Record<string,string>>({});
+ const [expense,setExpense]=useState({description:'',amount:'',accountCode:'5190',paymentMethod:'CASH',reference:'',notes:'',date:today()});
+ const [cash,setCash]=useState({direction:'RECEIPT',description:'',amount:'',paymentMethod:'CASH',accountCode:'4200',reference:'',date:today()});
+ async function load(){setData(await invoke<Data>('get_accounting_workspace',{actorStaffId:session.staffId}));}
+ useEffect(()=>{let live=true;setLoading(true);load().catch(e=>{if(live)setError(String(e));}).finally(()=>{if(live)setLoading(false);});return()=>{live=false;};},[session.staffId]);
+ const openingAccounts=useMemo(()=>data?.accounts.filter(a=>a.type==='ASSET'||a.type==='LIABILITY')||[],[data]);
+ const expenseAccounts=(data?.accounts||[]).filter(a=>a.type==='EXPENSE'&&!['4010','5000'].includes(a.code));
+ const offsetAccounts=(data?.accounts||[]).filter(a=>a.active&&!['1000','1010','1020'].includes(a.code));
+ const capital=openingAccounts.filter(a=>a.type==='ASSET').reduce((n,a)=>n+Number(opening[a.code]||0),0)-openingAccounts.filter(a=>a.type==='LIABILITY').reduce((n,a)=>n+Number(opening[a.code]||0),0);
+ async function submit(action:()=>Promise<unknown>,message:string){setBusy(true);setError('');setNotice('');try{await action();await load();setNotice(message);}catch(e){setError(String(e).replace(/^Error: /,''));}finally{setBusy(false);}}
+ async function saveOpening(e:FormEvent){e.preventDefault();const balances=Object.entries(opening).filter(([,v])=>v.trim()).map(([accountCode,amount])=>({accountCode,amount:Number(amount)}));await submit(()=>invoke('post_accounting_opening_balances',{actorStaffId:session.staffId,effectiveDate:openingDate,balances}),'Opening balances posted and locked against duplicate posting.');setOpening({});}
+ async function saveExpense(e:FormEvent){e.preventDefault();await submit(()=>invoke('save_accounting_expense',{actorStaffId:session.staffId,description:expense.description,amount:Number(expense.amount),accountCode:expense.accountCode,paymentMethod:expense.paymentMethod,reference:expense.reference,notes:expense.notes,date:expense.date}),'Expense saved and posted to the ledger.');setExpense({...expense,description:'',amount:'',reference:'',notes:''});}
+ async function saveCash(e:FormEvent){e.preventDefault();await submit(()=>invoke('save_accounting_cashbook',{actorStaffId:session.staffId,direction:cash.direction,description:cash.description,amount:Number(cash.amount),paymentMethod:cash.paymentMethod,accountCode:cash.accountCode,reference:cash.reference,date:cash.date}),'Cashbook entry saved and posted to the ledger.');setCash({...cash,description:'',amount:'',reference:''});}
+ if(loading)return <div className="content-card"><p>Loading local accounting records…</p></div>;
+ if(!data)return <div className="content-card"><h2>Accounting unavailable</h2><p className="error">{error||'Could not load accounting records.'}</p><button className="secondary" onClick={()=>{setLoading(true);load().catch(e=>setError(String(e))).finally(()=>setLoading(false));}}>Retry</button></div>;
+ return <div className="accounting-workspace">
+  <div className="section-heading"><div><h2>Financial position</h2><p>Offline double-entry accounting · KES · Local SQLite ledger</p></div><button className="secondary" onClick={()=>{setLoading(true);load().catch(e=>setError(String(e))).finally(()=>setLoading(false));}}>Refresh</button></div>
+  {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
+  <div className="metric-grid">
+   <article className="metric-card"><span>Income</span><strong>{money(data.profitAndLoss.income)}</strong><small>Posted income accounts</small></article>
+   <article className="metric-card"><span>Expenses</span><strong>{money(data.profitAndLoss.expenses)}</strong><small>Includes cost of goods sold</small></article>
+   <article className="metric-card"><span>Net profit</span><strong>{money(data.profitAndLoss.netProfit)}</strong><small>Income less expenses</small></article>
+   <article className="metric-card"><span>Cash & bank</span><strong>{money(data.cashbook.cashBalance)}</strong><small>Cash, M-Pesa and bank</small></article>
+  </div>
+  <section className="content-card"><div className="section-heading"><div><h3>Opening balances</h3><p>Enter balances from your existing books as at the date you start using this system.</p></div>{data.openingBalance&&<span className="count-pill">POSTED · LOCKED</span>}</div>
+   {data.openingBalance?<><div className="ledger-row"><span>Effective date</span><strong>{data.openingBalance.date}</strong></div><div className="ledger-row"><span>Journal reference</span><strong>{data.openingBalance.reference}</strong></div><div className="ledger-row"><span>Opening journal total</span><strong>{money(data.openingBalance.totalDebit)}</strong></div><p className="form-hint">Corrections require a separately authorised adjustment journal.</p></>:<form onSubmit={saveOpening}><label className="field">Opening balance date<input type="date" value={openingDate} onChange={e=>setOpeningDate(e.target.value)} required/></label><div className="opening-account-list">{openingAccounts.map(a=><label className="opening-account-row" key={a.code}><span><b>{a.code} · {a.name}</b><small>{a.type==='ASSET'?'Asset · Debit balance':'Liability · Credit balance'}</small></span><span className="opening-amount"><small>KSh</small><input type="number" min="0" step="0.01" placeholder="0.00" value={opening[a.code]||''} onChange={e=>setOpening({...opening,[a.code]:e.target.value})}/></span></label>)}</div><div className="opening-equity-preview"><span>Calculated owner's capital / opening equity</span><strong>{money(capital)}</strong></div><p className="form-hint">Opening inventory value is accounting-only. Enter stock quantities separately to avoid double counting.</p><button className="primary" disabled={busy||!Object.values(opening).some(v=>Number(v)>0)}>Post opening balances</button></form>}
+  </section>
+  <div className="accounting-columns">
+   <section className="content-card"><div className="section-heading"><div><h3>Record an expense</h3><p>Automatically posts expense debit and cash/bank credit.</p></div></div><form className="form-grid" onSubmit={saveExpense}>
+    <label className="wide">Description<input value={expense.description} onChange={e=>setExpense({...expense,description:e.target.value})} required maxLength={180}/></label>
+    <label>Amount (KSh)<input type="number" min="0.01" step="0.01" value={expense.amount} onChange={e=>setExpense({...expense,amount:e.target.value})} required/></label>
+    <label>Expense category<select value={expense.accountCode} onChange={e=>setExpense({...expense,accountCode:e.target.value})}>{expenseAccounts.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}</select></label>
+    <label>Paid from<select value={expense.paymentMethod} onChange={e=>setExpense({...expense,paymentMethod:e.target.value})}><option value="CASH">Cash</option><option value="MPESA">M-Pesa</option><option value="BANK">Bank</option></select></label>
+    <label>Date<input type="date" value={expense.date} onChange={e=>setExpense({...expense,date:e.target.value})}/></label>
+    <label>Receipt / reference<input value={expense.reference} onChange={e=>setExpense({...expense,reference:e.target.value})}/></label>
+    <label className="wide">Notes<input value={expense.notes} onChange={e=>setExpense({...expense,notes:e.target.value})}/></label><div className="wide"><button className="primary" disabled={busy}>Save expense</button></div>
+   </form></section>
+   <section className="content-card"><div className="section-heading"><div><h3>Cashbook entry</h3><p>Other receipts/payments not already entered through POS or purchasing.</p></div></div><form className="form-grid" onSubmit={saveCash}>
+    <label>Direction<select value={cash.direction} onChange={e=>setCash({...cash,direction:e.target.value,accountCode:e.target.value==='RECEIPT'?'4200':'5190'})}><option value="RECEIPT">Money received</option><option value="PAYMENT">Money paid</option></select></label>
+    <label className="wide">Description<input value={cash.description} onChange={e=>setCash({...cash,description:e.target.value})} required maxLength={180}/></label>
+    <label>Amount (KSh)<input type="number" min="0.01" step="0.01" value={cash.amount} onChange={e=>setCash({...cash,amount:e.target.value})} required/></label>
+    <label>Cash / bank account<select value={cash.paymentMethod} onChange={e=>setCash({...cash,paymentMethod:e.target.value})}><option value="CASH">Cash</option><option value="MPESA">M-Pesa</option><option value="BANK">Bank</option></select></label>
+    <label className="wide">Offset account<select value={cash.accountCode} onChange={e=>setCash({...cash,accountCode:e.target.value})}>{offsetAccounts.map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}</select></label>
+    <label>Date<input type="date" value={cash.date} onChange={e=>setCash({...cash,date:e.target.value})}/></label><label>Reference<input value={cash.reference} onChange={e=>setCash({...cash,reference:e.target.value})}/></label>
+    <div className="wide"><button className="primary" disabled={busy}>Save cashbook entry</button></div>
+   </form></section>
+  </div>
+  <div className="accounting-columns">
+   <section className="content-card"><div className="section-heading"><div><h3>Profit & loss</h3><p>Posted income and expense balances · inception to date</p></div></div>{data.trialBalance.filter(a=>a.type==='INCOME'||a.type==='EXPENSE').map(a=><div className="ledger-row" key={a.code}><span>{a.code} · {a.name}</span><strong>{money(a.type==='INCOME'?a.creditBalance-a.debitBalance:a.debitBalance-a.creditBalance)}</strong></div>)}<div className="ledger-heading"><b>Net profit</b><strong>{money(data.profitAndLoss.netProfit)}</strong></div></section>
+   <section className="content-card"><div className="section-heading"><div><h3>Balance sheet</h3><p>Current balances including current-period profit</p></div></div><div className="ledger-row"><span>Total assets</span><strong>{money(data.balanceSheet.assets)}</strong></div><div className="ledger-row"><span>Total liabilities</span><strong>{money(data.balanceSheet.liabilities)}</strong></div><div className="ledger-row"><span>Equity including current profit</span><strong>{money(data.balanceSheet.equity)}</strong></div><div className="ledger-heading"><b>Liabilities + equity</b><strong>{money(data.balanceSheet.liabilities+data.balanceSheet.equity)}</strong></div></section>
+  </div>
+  <section className="content-card"><div className="section-heading"><div><h3>Trial balance & chart of accounts</h3><p>{data.accounts.length} accounts · {data.postedJournalCount} posted journals</p></div></div><div className="table-wrap"><table><thead><tr><th>Code / account</th><th>Type</th><th>Debit balance</th><th>Credit balance</th></tr></thead><tbody>{data.trialBalance.map(a=><tr key={a.code}><td><b>{a.code}</b> · {a.name}</td><td>{a.type}</td><td>{money(a.debitBalance)}</td><td>{money(a.creditBalance)}</td></tr>)}</tbody></table></div></section>
+  <section className="content-card"><div className="section-heading"><div><h3>General ledger journals</h3><p>Source-linked entries protected against duplicate posting.</p></div></div>{data.journals.length?data.journals.slice(0,30).map(j=><article className="purchase-card" key={j.id}><div className="record-row"><div className="record-copy"><strong>{j.description}</strong><small>{j.reference} · {j.sourceType} · {j.date}</small></div><b>{money(j.totalDebit)}</b></div>{j.lines.map((line,i)=><div className="ledger-row" key={i}><span>{line.accountCode} · {line.accountName}</span><span>Dr {money(line.debit)} / Cr {money(line.credit)}</span></div>)}</article>):<div className="empty-state">No posted journals yet. Transactions will appear here.</div>}</section>
+ </div>;
+}
