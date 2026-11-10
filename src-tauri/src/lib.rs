@@ -1322,8 +1322,13 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let order_pct=order_discount_percent.unwrap_or(0.0);if !order_pct.is_finite()||!(0.0..=100.0).contains(&order_pct){return Err("Order discount must be between 0% and 100%.".into());}
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}ensure_branch_not_in_stocktake(&c,&branch_id)?;
-    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;let mut subtotal=0.0f64;let mut eligible_total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();
+    if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}
+    ensure_branch_access(&c,&actor_staff_id,&branch_id)?;ensure_branch_not_in_stocktake(&c,&branch_id)?;
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
+    let business_id:String=tx.query_row("SELECT business_id FROM branches WHERE id=?1",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let actor_business:String=tx.query_row("SELECT business_id FROM staff_profiles WHERE id=?1 AND status='active'",[&actor_staff_id],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if actor_business!=business_id{return Err("This cashier account cannot transact for the selected business.".into());}
+    let mut subtotal=0.0f64;let mut eligible_total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();
     for item in &items{
         let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;let pct=item["discountPercent"].as_f64().unwrap_or(0.0);
         if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}if !pct.is_finite()||!(0.0..=100.0).contains(&pct){return Err("Each product discount must be between 0% and 100%.".into());}
@@ -1345,7 +1350,6 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let (linked_customer_id,linked_customer_name,linked_customer_phone)=if let Some(cid)=customer_id.as_deref(){let row:Option<(String,String)>=tx.query_row("SELECT name,phone FROM customers WHERE id=?1 AND business_id=(SELECT business_id FROM branches WHERE id=?2) AND active=1",params![cid,branch_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;let (n,p)=row.ok_or_else(||"The selected customer is unavailable for this business.".to_string())?;(Some(cid.to_string()),Some(n),Some(p))}else{let n=customer_name.as_deref().unwrap_or("").trim().to_string();let p=customer_phone.as_deref().unwrap_or("").trim().to_string();(None,if n.is_empty(){None}else{Some(n)},if p.is_empty(){None}else{Some(p)})};
     if (cash_amount+mpesa_amount-total).abs()>0.01{return Err("Cash and M-Pesa payments must add up exactly to the discounted sale total.".into());}
     let actual=if cash_amount>0.0&&mpesa_amount>0.0{"SPLIT"}else if mpesa_amount>0.0{"MPESA"}else{"CASH"};if method!=actual{return Err("Payment method does not match the entered payment amounts.".into());}
-    let business_id:String=tx.query_row("SELECT business_id FROM branches WHERE id=?1",[&branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO sales(id,receipt_number,branch_id,shift_id,cashier_staff_id,total,payment_method,payment_reference,customer_id,customer_name,customer_phone,cash_amount,mpesa_amount,subtotal,discount_amount,discount_type,discount_value,discount_approved_by,discount_approved_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,CASE WHEN ?18 IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)",params![sale_id,receipt,branch_id,shift_id,actor_staff_id,total,method,payment_reference,linked_customer_id,linked_customer_name,linked_customer_phone,cash_amount,mpesa_amount,subtotal,discount_total,if has_discount{"PERCENT"}else{"NONE"},order_pct,approver]).map_err(|e|e.to_string())?;
     if cash_amount>0.0{tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'CASH',NULL,?4,'POS_SALE',?5,?6)",params![Uuid::new_v4().to_string(),business_id,cash_amount,format!("Cash received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;}
     if mpesa_amount>0.0{tx.execute("INSERT INTO cashbook_entries(id,business_id,entry_type,direction,amount,payment_method,reference,description,source_type,source_id,actor_staff_id) VALUES(?1,?2,'POS_SALE','IN',?3,'MPESA',?4,?5,'POS_SALE',?6,?7)",params![Uuid::new_v4().to_string(),business_id,mpesa_amount,payment_reference.as_deref().unwrap_or(""),format!("M-Pesa received for {}",receipt),sale_id,actor_staff_id]).map_err(|e|e.to_string())?;}
@@ -2214,12 +2218,12 @@ fn get_management_reports(
         if exists == 0 { return Err("The selected branch is unavailable.".into()); }
     }
 
-    let sales: (i64, f64, f64, f64) = c.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(s.total),0),COALESCE(SUM(s.discount_amount),0),COALESCE(AVG(s.total),0)
+    let sales: (i64, f64, f64, f64, f64) = c.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(s.subtotal),0),COALESCE(SUM(s.discount_amount),0),COALESCE(SUM(s.total),0),COALESCE(AVG(s.total),0)
          FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
          AND date(s.created_at) BETWEEN ?1 AND ?2 AND (?3 IS NULL OR s.branch_id=?3)",
         rusqlite::params![start,end,selected.as_deref()],
-        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
     ).map_err(|e| e.to_string())?;
     let refunds: f64 = c.query_row(
         "SELECT COALESCE(SUM(refund_total),0) FROM sale_returns
@@ -2227,7 +2231,7 @@ fn get_management_reports(
          AND (?3 IS NULL OR branch_id=?3)",
         rusqlite::params![start,end,selected.as_deref()], |r| r.get(0)
     ).map_err(|e| e.to_string())?;
-    let net_sales = (sales.1 - refunds).max(0.0);
+    let net_sales = (sales.3 - refunds).max(0.0);
     let return_count: i64 = c.query_row(
         "SELECT COUNT(*) FROM sale_returns WHERE status='COMPLETED' AND date(created_at) BETWEEN ?1 AND ?2
          AND (?3 IS NULL OR branch_id=?3)",
@@ -2235,7 +2239,7 @@ fn get_management_reports(
     ).map_err(|e| e.to_string())?;
 
     let mut daily_stmt = c.prepare(
-        "SELECT date(s.created_at),COUNT(*),COALESCE(SUM(s.total),0),
+        "SELECT date(s.created_at),COUNT(*),COALESCE(SUM(s.subtotal),0),COALESCE(SUM(s.discount_amount),0),
          COALESCE((SELECT SUM(r.refund_total) FROM sale_returns r WHERE r.status='COMPLETED'
           AND date(r.created_at)=date(s.created_at) AND r.branch_id=s.branch_id),0)
          FROM sales s WHERE s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
@@ -2243,8 +2247,8 @@ fn get_management_reports(
          GROUP BY date(s.created_at) ORDER BY date(s.created_at)"
     ).map_err(|e| e.to_string())?;
     let daily = daily_stmt.query_map(rusqlite::params![start,end,selected.as_deref()], |r| {
-        let gross: f64 = r.get(2)?; let refund: f64 = r.get(3)?;
-        Ok(serde_json::json!({"date":r.get::<_,String>(0)?,"transactions":r.get::<_,i64>(1)?,"sales":gross,"refunds":refund,"netSales":(gross-refund).max(0.0)}))
+        let gross: f64 = r.get(2)?; let discounts: f64 = r.get(3)?; let refund: f64 = r.get(4)?;
+        Ok(serde_json::json!({"date":r.get::<_,String>(0)?,"transactions":r.get::<_,i64>(1)?,"sales":gross,"refunds":refund,"netSales":(gross-discounts-refund).max(0.0)}))
     }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
 
     let mut payment_stmt = c.prepare(
@@ -2307,7 +2311,7 @@ fn get_management_reports(
     ).map_err(|e| e.to_string())?;
 
     let mut branch_stmt = c.prepare(
-        "SELECT b.id,b.name,COUNT(s.id),COALESCE(SUM(s.total),0)
+        "SELECT b.id,b.name,COUNT(s.id),COALESCE(SUM(s.subtotal),0)
          FROM branches b LEFT JOIN sales s ON s.branch_id=b.id AND date(s.created_at) BETWEEN ?1 AND ?2
           AND s.status IN ('COMPLETED','PARTIALLY_RETURNED','RETURNED')
          WHERE b.business_id=?3 AND b.status='active' AND (?4 IS NULL OR b.id=?4)
