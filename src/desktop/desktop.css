@@ -334,3 +334,25 @@ td { color:#3d4d42; }
  .customer-profile .section-heading { flex-direction:column; }
  .customer-count { align-items:flex-start; }
 }
+
+
+/* Central master catalogue view switch */
+.catalogue-view-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.catalogue-view-switch button {
+  min-height: 40px;
+}
+.catalogue-browser .section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.catalogue-product-tile {
+  text-align: left;
+}
