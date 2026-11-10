@@ -1289,7 +1289,7 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     let shift:i64=c.query_row("SELECT COUNT(*) FROM pos_shifts WHERE id=?1 AND cashier_staff_id=?2 AND branch_id=?3 AND status='OPEN'",params![shift_id,actor_staff_id,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
     if shift==0{return Err("Open a cashier shift for this branch before taking payment.".into());}ensure_branch_not_in_stocktake(&c,&branch_id)?;
-    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;let mut subtotal=0.0f64;let mut eligible_total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();let mut has_discount=order_pct>0.0;
+    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;let mut subtotal=0.0f64;let mut eligible_total=0.0f64;let mut lines:Vec<serde_json::Value>=Vec::new();
     for item in &items{
         let pid=item["productId"].as_str().ok_or_else(||"A sale line is missing its product.".to_string())?;let qty=item["quantity"].as_f64().ok_or_else(||"Enter a valid sale quantity.".to_string())?;let pct=item["discountPercent"].as_f64().unwrap_or(0.0);
         if !qty.is_finite()||qty<=0.0{return Err("Sale quantities must be greater than zero.".into());}if !pct.is_finite()||!(0.0..=100.0).contains(&pct){return Err("Each product discount must be between 0% and 100%.".into());}
@@ -1297,15 +1297,15 @@ fn process_pos_sale(database:tauri::State<'_,LocalDatabase>,actor_staff_id:Strin
         let stock:f64=tx.query_row("SELECT COALESCE(SUM(quantity_delta),0) FROM stock_movements WHERE product_id=?1 AND branch_id=?2",params![pid,branch_id],|r|r.get(0)).map_err(|e|e.to_string())?;
         let already:f64=lines.iter().filter(|x:&&serde_json::Value|x["productId"].as_str()==Some(pid)).map(|x|x["quantity"].as_f64().unwrap_or(0.0)).sum();if qty+already>stock+0.000001{return Err(format!("Insufficient stock for {}. Available: {}",product.0,(stock-already).max(0.0)));}
         let gross=(qty*product.2*100.0).round()/100.0;let line_discount=(gross*pct/100.0*100.0).round()/100.0;let eligible=(gross-line_discount).max(0.0);
-        subtotal+=gross;eligible_total+=eligible;if pct>0.0{has_discount=true;}
+        subtotal+=gross;eligible_total+=eligible;
         let unit_cost:f64=tx.query_row("SELECT COALESCE(SUM(total_cost)/NULLIF(SUM(quantity),0),?3) FROM stock_movements WHERE product_id=?1 AND branch_id=?2 AND movement_type='RECEIPT'",params![pid,branch_id,product.3],|r|r.get(0)).map_err(|e|e.to_string())?;
         lines.push(serde_json::json!({"productId":pid,"name":product.0,"quantity":qty,"unitPrice":product.2,"unitCost":unit_cost,"grossTotal":gross,"lineDiscount":line_discount,"eligibleTotal":eligible,"lineDiscountPercent":pct}));
     }
     subtotal=(subtotal*100.0).round()/100.0;eligible_total=(eligible_total*100.0).round()/100.0;
     let order_discount=(eligible_total*order_pct/100.0*100.0).round()/100.0;let mut discount_total=0.0f64;
     let line_count=lines.len();let mut allocated_order_discount=0.0f64;
-    for (index,line) in lines.iter_mut().enumerate(){let share=if index+1==line_count{(order_discount-allocated_order_discount).max(0.0)}else if eligible_total>0.0{(line["eligibleTotal"].as_f64().unwrap_or(0.0)/eligible_total*order_discount*100.0).round()/100.0}else{0.0};allocated_order_discount+=share;let discount=line["lineDiscount"].as_f64().unwrap_or(0.0)+share;let net=(line["grossTotal"].as_f64().unwrap_or(0.0)-discount).max(0.0);line["discountAmount"]=serde_json::json!(discount);line["netLineTotal"]=serde_json::json!(net);discount_total+=discount;}
-    discount_total=(discount_total*100.0).round()/100.0;let total=(subtotal-discount_total).max(0.0);
+    for (index,line) in lines.iter_mut().enumerate(){let remaining_order_discount=(order_discount-allocated_order_discount).max(0.0);let share=if index+1==line_count{remaining_order_discount}else if eligible_total>0.0{((line["eligibleTotal"].as_f64().unwrap_or(0.0)/eligible_total*order_discount*100.0).round()/100.0).min(remaining_order_discount)}else{0.0};allocated_order_discount+=share;let discount=line["lineDiscount"].as_f64().unwrap_or(0.0)+share;let net=(line["grossTotal"].as_f64().unwrap_or(0.0)-discount).max(0.0);line["discountAmount"]=serde_json::json!(discount);line["netLineTotal"]=serde_json::json!(net);discount_total+=discount;}
+    discount_total=(discount_total*100.0).round()/100.0;let total=(subtotal-discount_total).max(0.0);let has_discount=discount_total>0.005;
     let approver=if has_discount{Some(pos_approval_actor(&tx,&actor_staff_id,&branch_id,approver_username.as_deref(),approver_password.as_deref())?)}else{None};
     let receipt=format!("HR-{}",Uuid::new_v4().simple().to_string().chars().take(12).collect::<String>().to_uppercase());let sale_id=Uuid::new_v4().to_string();
     let (linked_customer_id,linked_customer_name,linked_customer_phone)=if let Some(cid)=customer_id.as_deref(){let row:Option<(String,String)>=tx.query_row("SELECT name,phone FROM customers WHERE id=?1 AND business_id=(SELECT business_id FROM branches WHERE id=?2) AND active=1",params![cid,branch_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;let (n,p)=row.ok_or_else(||"The selected customer is unavailable for this business.".to_string())?;(Some(cid.to_string()),Some(n),Some(p))}else{let n=customer_name.as_deref().unwrap_or("").trim().to_string();let p=customer_phone.as_deref().unwrap_or("").trim().to_string();(None,if n.is_empty(){None}else{Some(n)},if p.is_empty(){None}else{Some(p)})};
