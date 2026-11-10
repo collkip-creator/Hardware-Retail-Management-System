@@ -2305,7 +2305,7 @@ fn get_management_reports(
         Ok(serde_json::json!({"branchId":r.get::<_,String>(0)?,"branch":r.get::<_,String>(1)?,"transactions":r.get::<_,i64>(2)?,"sales":r.get::<_,f64>(3)?}))
     }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
 
-    let branches_stmt = c.prepare(
+    let mut branches_stmt = c.prepare(
         "SELECT id,name FROM branches WHERE business_id=?1 AND status='active' AND (?2 IS NULL OR id=?2) ORDER BY name"
     ).map_err(|e| e.to_string())?;
     let branches = branches_stmt.query_map(rusqlite::params![business,selected.as_deref()], |r| {
