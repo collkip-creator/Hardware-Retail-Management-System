@@ -1301,13 +1301,14 @@ fn open_pos_shift(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,
 }
 
 fn pos_approval_actor(c:&Connection,actor_staff_id:&str,branch_id:&str,approver_username:Option<&str>,approver_password:Option<&str>)->Result<String,String>{
-    let actor_role:String=c.query_row("SELECT role FROM staff_profiles WHERE id=?1 AND status='active'",[actor_staff_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?.ok_or_else(||"Your staff account is inactive.".to_string())?;
+    let (actor_role,actor_business):(String,String)=c.query_row("SELECT role,business_id FROM staff_profiles WHERE id=?1 AND status='active'",[actor_staff_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Your staff account is inactive.".to_string())?;
     if actor_role=="Business Owner"||actor_role=="Manager"{return Ok(actor_staff_id.to_string());}
     let username=approver_username.unwrap_or("").trim();let password=approver_password.unwrap_or("");
     if username.is_empty()||password.is_empty(){return Err("A Business Owner or Manager must approve this discount or return. Enter their staff username and password.".into());}
-    let record:Option<(String,String,Option<String>,String)>=c.query_row("SELECT p.id,p.role,p.branch_id,a.password_hash FROM staff_accounts a JOIN staff_profiles p ON p.id=a.staff_profile_id WHERE lower(a.username)=lower(?1) AND a.status='active' AND p.status='active'",[username],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(|e|e.to_string())?;
-    let (id,role,assigned,hash)=record.ok_or_else(||"The approving staff account was not found or is inactive.".to_string())?;
+    let record:Option<(String,String,Option<String>,String,String)>=c.query_row("SELECT p.id,p.role,p.branch_id,a.password_hash,p.business_id FROM staff_accounts a JOIN staff_profiles p ON p.id=a.staff_profile_id WHERE lower(a.username)=lower(?1) AND a.status='active' AND p.status='active'",[username],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(|e|e.to_string())?;
+    let (id,role,assigned,hash,approver_business)=record.ok_or_else(||"The approving staff account was not found or is inactive.".to_string())?;
     if role!="Business Owner"&&role!="Manager"{return Err("Only a Business Owner or Manager can approve discounts and returns.".into());}
+    if approver_business!=actor_business{return Err("The approving manager must belong to the same business.".into());}
     if role!="Business Owner"&&assigned.as_deref().is_some_and(|b|b!=branch_id){return Err("The approving Manager must be assigned to this branch.".into());}
     if !verify_password(password,&hash)?{return Err("The approving Manager's password is incorrect.".into());}Ok(id)
 }
@@ -1716,9 +1717,9 @@ fn receive_stock_transfer(database:tauri::State<'_,LocalDatabase>,actor_staff_id
     let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     inventory_actor_role(&c,&actor_staff_id,&["Business Owner","Manager","Storekeeper"])?;
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
-    let (to,status):(String,String)=tx.query_row("SELECT to_branch_id,status FROM stock_transfers WHERE id=?1",[&transfer_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Transfer not found.".to_string())?;
-    if status!="IN_TRANSIT"{return Err("Only dispatched transfers can be received.".into());}ensure_branch_access(&tx,&actor_staff_id,&to)?;ensure_branch_not_in_stocktake(&tx,&to)?;
-    let mut stmt=tx.prepare("SELECT i.product_id,i.quantity,COALESCE((SELECT m.unit_cost FROM stock_movements m WHERE m.reference=?1 AND m.product_id=i.product_id ORDER BY m.created_at DESC LIMIT 1),0) FROM stock_transfer_items i WHERE i.transfer_id=?1").map_err(|e|e.to_string())?;
+    let (from,to,status):(String,String,String)=tx.query_row("SELECT from_branch_id,to_branch_id,status FROM stock_transfers WHERE id=?1",[&transfer_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())?.ok_or_else(||"Transfer not found.".to_string())?;
+    if status!="IN_TRANSIT"{return Err("Only dispatched transfers can be received.".into());}ensure_branch_belongs_to_actor_business(&tx,&actor_staff_id,&from)?;ensure_branch_access(&tx,&actor_staff_id,&to)?;ensure_branch_not_in_stocktake(&tx,&to)?;
+    let mut stmt=tx.prepare("SELECT i.product_id,i.quantity,COALESCE((SELECT m.unit_cost FROM stock_movements m WHERE m.reference=?1 AND m.product_id=i.product_id AND m.quantity_delta<0 ORDER BY m.created_at DESC LIMIT 1),0) FROM stock_transfer_items i WHERE i.transfer_id=?1").map_err(|e|e.to_string())?;
     let items=stmt.query_map([&transfer_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?,r.get::<_,f64>(2)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;drop(stmt);
     for (pid,qty,cost) in items{tx.execute("INSERT INTO stock_movements(id,product_id,branch_id,movement_type,quantity,quantity_delta,unit_cost,total_cost,reference,actor_staff_id) VALUES(?1,?2,?3,'ADJUSTMENT',?4,?5,?6,?7,?8,?9)",params![Uuid::new_v4().to_string(),pid,to,qty,qty,cost,qty*cost,transfer_id,actor_staff_id]).map_err(|e|e.to_string())?;}
     tx.execute("UPDATE stock_transfers SET status='RECEIVED',received_by=?1,received_at=CURRENT_TIMESTAMP WHERE id=?2",params![actor_staff_id,transfer_id]).map_err(|e|e.to_string())?;
@@ -2156,11 +2157,12 @@ fn record_supplier_payment(database:tauri::State<'_,LocalDatabase>,actor_staff_i
     let method=payment_method.trim().to_uppercase();if !["CASH","MPESA","BANK"].contains(&method.as_str()){return Err("Choose Cash, M-Pesa or Bank.".into());}
     let reference=reference.trim();if method=="MPESA"&&reference.is_empty(){return Err("Enter the M-Pesa transaction code for this payment.".into());}
     let mut c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
-    let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager"])?;
+    let (_,assigned,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager"])?;
     let tx=c.transaction().map_err(|e|e.to_string())?;
-    let row:Option<(f64,f64,String,String,String,String,String)>=tx.query_row("SELECT total,paid_amount,payments_json,order_number,supplier_name,status,business_id FROM purchase_orders WHERE id=?1", [&purchase_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|e|e.to_string())?;
-    let (total,paid,payments_json,order_number,supplier_name,status,order_business)=row.ok_or_else(||"Purchase order not found.".to_string())?;
+    let row:Option<(f64,f64,String,String,String,String,String,String)>=tx.query_row("SELECT total,paid_amount,payments_json,order_number,supplier_name,status,business_id,branch_id FROM purchase_orders WHERE id=?1", [&purchase_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(|e|e.to_string())?;
+    let (total,paid,payments_json,order_number,supplier_name,status,order_business,order_branch)=row.ok_or_else(||"Purchase order not found.".to_string())?;
     if order_business!=business{return Err("Purchase order does not belong to this business.".into());}
+    if assigned.as_deref().is_some_and(|branch|branch!=order_branch){return Err("You can only record payments for purchases at your assigned branch.".into());}
     let balance=(total-paid).max(0.0);if amount>balance+0.01{return Err("Payment cannot exceed the outstanding supplier balance.".into());}
     let mut payments:Vec<serde_json::Value>=serde_json::from_str(&payments_json).unwrap_or_default();let now:String=tx.query_row("SELECT CURRENT_TIMESTAMP",[],|r|r.get(0)).map_err(|e|e.to_string())?;
     payments.push(serde_json::json!({"amount":amount,"paymentMethod":method,"reference":reference,"paidAt":now}));
