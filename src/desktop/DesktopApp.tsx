@@ -6,7 +6,7 @@ import InventoryWorkspace from './InventoryWorkspace';
 import SuppliersPurchasingWorkspace from './SuppliersPurchasingWorkspace';
 import CustomersWorkspace from './CustomersWorkspace';
 import AccountingWorkspace from './AccountingWorkspace';
-import ReportsWorkspace from './ReportsWorkspace';
+import ReportsWorkspace from './ReportsWorkspace';\nimport AuditTrailWorkspace from './AuditTrailWorkspace';
 
 type LocalStatus = { setupRequired: boolean; deviceId: string; staffCount: number; schemaVersion: number };
 type StaffSession = { staffId: string; username: string; displayName: string; role: string; branchId: string | null; mustChangePassword?: boolean };
@@ -14,7 +14,7 @@ type BusinessProfile = { id: string; name: string; currency: string; timezone: s
 type Branch = { id: string; name: string; code: string | null; status: string };
 type Staff = { staffId: string; displayName: string; role: string; branchId: string | null; username: string; status: string; mustChangePassword: boolean };
 type Device = { id: string; deviceName: string; deviceType: string; status: string; lastSeenAt: string };
-type Tab = 'overview' | 'catalogue' | 'pos' | 'inventory' | 'procurement' | 'customers' | 'accounting' | 'reports' | 'business' | 'branches' | 'staff' | 'devices';
+type Tab = 'overview' | 'catalogue' | 'pos' | 'inventory' | 'procurement' | 'customers' | 'accounting' | 'reports' | 'business' | 'branches' | 'staff' | 'devices' | 'audit';
 type SyncStatus = { paired: boolean; ownerDevice: boolean; licenceActive: boolean; licenceStatus: string; licenceMessage: string | null; lastSyncAt: string | null };
 type SyncResult = { ownerDevice: boolean; updatedAt: string; branches: number; staff: number };
 type PairingCodeResult = { code: string; expiresAt: string; ownerDevice: boolean };
@@ -267,7 +267,7 @@ export default function DesktopApp() {
 
   const updateBusiness = (key: keyof BusinessProfile, value: string) => setBusiness(current => current ? { ...current, [key]: value } : current);
   const nav: { id: Tab; label: string; icon: string }[] = [
-    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'procurement',label:'Suppliers & purchasing',icon:'▧'},{id:'customers',label:'Customers',icon:'♙'},{id:'accounting',label:'Accounting',icon:'▣'},{id:'reports',label:'Reports & management',icon:'▤'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
+    {id:'overview',label:'Overview',icon:'⌂'},{id:'catalogue',label:'Products & stock',icon:'▦'},{id:'pos',label:'Point of sale',icon:'▣'},{id:'inventory',label:'Inventory',icon:'▤'},{id:'procurement',label:'Suppliers & purchasing',icon:'▧'},{id:'customers',label:'Customers',icon:'♙'},{id:'accounting',label:'Accounting',icon:'▣'},{id:'reports',label:'Reports & management',icon:'▤'},{id:'audit',label:'Audit Trail',icon:'◷'},{id:'business',label:'Business profile',icon:'▤'},{id:'branches',label:'Branches',icon:'⌖'},{id:'staff',label:'Staff & access',icon:'♙'},{id:'devices',label:'Devices',icon:'▣'}
   ];
 
   return <main className="app-shell">
@@ -290,7 +290,7 @@ export default function DesktopApp() {
       {tab==='procurement'&&<SuppliersPurchasingWorkspace session={session} />}
       {tab==='customers'&&<CustomersWorkspace session={session} />}
       {tab==='accounting'&&<AccountingWorkspace session={session} />}
-      {tab==='reports'&&<ReportsWorkspace session={session} />}
+      {tab==='reports'&&<ReportsWorkspace session={session} />}\n      {tab==='audit'&&<AuditTrailWorkspace actorStaffId={session.staffId} />}
       {tab==='business'&&business&&<div className="content-card"><div className="section-heading"><div><h2>Business details</h2><p>These details identify your business in the desktop workspace.</p></div></div>
         <form className="form-grid" onSubmit={saveBusiness}><div className="wide logo-upload"><div className="logo-preview">{business.logoDataUrl?<img src={business.logoDataUrl} alt="Business logo"/>:<span>LOGO</span>}</div><label>Business logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={async e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>100*1024){setError("For reliable cloud sync, use a logo image of 100 KB or smaller.");return;}const reader=new FileReader();reader.onload=()=>updateBusiness("logoDataUrl",String(reader.result));reader.readAsDataURL(file);}}/><small>PNG, JPG or WebP · Maximum 100 KB</small></label>{business.logoDataUrl&&<button type="button" className="secondary" onClick={()=>updateBusiness("logoDataUrl","")}>Remove logo</button>}</div><label className="wide">Business / trading name<input value={business.name} onChange={e=>updateBusiness('name',e.target.value)} required minLength={2} maxLength={120}/></label><label>Phone number<input value={business.phone||''} onChange={e=>updateBusiness('phone',e.target.value)} placeholder="+254…"/></label><label>Email address<input type="email" value={business.email||''} onChange={e=>updateBusiness('email',e.target.value)} placeholder="name@business.co.ke"/></label><label className="wide">Business address<textarea value={business.address||''} onChange={e=>updateBusiness('address',e.target.value)} rows={3}/></label><label>Currency<select value={business.currency} onChange={e=>updateBusiness('currency',e.target.value)}><option value="KES">KES — Kenyan Shilling</option><option value="USD">USD — US Dollar</option><option value="UGX">UGX — Uganda Shilling</option><option value="TZS">TZS — Tanzania Shilling</option></select></label><label>Time zone<input value={business.timezone} onChange={e=>updateBusiness('timezone',e.target.value)} required/></label><div className="wide form-actions"><button className="primary" disabled={busy}>Save business profile</button></div></form>
       </div>}
