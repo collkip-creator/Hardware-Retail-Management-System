@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import PosWorkspace from './PosWorkspace';
 import CatalogueWorkspace from './CatalogueWorkspace';
@@ -51,6 +51,8 @@ export default function DesktopApp() {
   const [pairingResult, setPairingResult] = useState<PairingCodeResult | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [refreshingLicence, setRefreshingLicence] = useState(false);
+  const [syncRevision, setSyncRevision] = useState(0);
+  const lastCloudVersion = useRef('');
 
   useEffect(() => {
     const initialise = async () => {
@@ -89,6 +91,31 @@ export default function DesktopApp() {
   useEffect(() => {
     if (session?.role === 'Business Owner') refreshWorkspace(session.staffId).catch((e) => setError(String(e)));
   }, [session?.staffId]);
+
+  // Keep paired desktops current while signed in; do not require sign-out/sign-in.
+  useEffect(() => {
+    if (!session || !syncStatus.paired || !online) return;
+    let running = false;
+    const poll = async () => {
+      if (running || !navigator.onLine || document.visibilityState === 'hidden') return;
+      running = true;
+      try {
+        const result = await invoke<SyncResult>('sync_desktop_workspace');
+        const changed = !!lastCloudVersion.current && lastCloudVersion.current !== result.updatedAt;
+        lastCloudVersion.current = result.updatedAt;
+        setSyncStatus(current => ({ ...current, lastSyncAt: result.updatedAt }));
+        if (changed) {
+          setStatus(await invoke<LocalStatus>('get_local_status'));
+          setSyncRevision(value => value + 1);
+          if (session.role === 'Business Owner') await refreshWorkspace(session.staffId);
+        }
+      } catch (e) {
+        // Temporary network failures must not interrupt offline work.
+      } finally { running = false; }
+    };
+    const timer = window.setInterval(poll, 30000);
+    return () => window.clearInterval(timer);
+  }, [session?.staffId, session?.role, syncStatus.paired, online]);
 
   async function syncIfPaired() {
     const current = await invoke<SyncStatus>('get_device_sync_status');
@@ -274,14 +301,14 @@ export default function DesktopApp() {
         <div className="side-bottom"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Internet available' : 'Offline mode'}<small>{session.displayName} · {session.role}</small><button className="secondary signout" onClick={() => setSession(null)}>Sign out</button></div>
       </aside>
       <section className="main-area">
-        <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Syncing…':'Sync now'}</button>}{syncStatus.paired&&<button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
-        {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
+        <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Syncing…':'Sync now'}</button>}{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
+        {activeStaffTab === 'catalogue' && <CatalogueWorkspace key={syncRevision} session={session} />}
         {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
-        {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} />}
-        {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace session={session} />}
-        {activeStaffTab === 'customers' && <CustomersWorkspace session={session} />}
-        {activeStaffTab === 'accounting' && <AccountingWorkspace session={session} />}
-        {activeStaffTab === 'reports' && <ReportsWorkspace session={session} />}
+        {activeStaffTab === 'inventory' && <InventoryWorkspace key={syncRevision} session={session} />}
+        {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace key={syncRevision} session={session} />}
+        {activeStaffTab === 'customers' && <CustomersWorkspace key={syncRevision} session={session} />}
+        {activeStaffTab === 'accounting' && <AccountingWorkspace key={syncRevision} session={session} />}
+        {activeStaffTab === 'reports' && <ReportsWorkspace key={syncRevision} session={session} />}
       </section>
     </main>;
   }
@@ -306,7 +333,7 @@ export default function DesktopApp() {
         <div className="setup-list"><SetupStep done={business.name!==`${session.displayName}'s Business`} title="Complete business profile" detail="Add your trading name and contact information" onClick={()=>setTab('business')}/><SetupStep done={branches.length>0} title="Register your first branch" detail="Create the main store or first outlet" onClick={()=>setTab('branches')}/><SetupStep done={staff.length>1} title="Add your team" detail="Create staff logins and assign their roles" onClick={()=>setTab('staff')}/></div>
       </>}
       {tab==='catalogue'&&<CatalogueWorkspace session={session} />}
-      {tab==='pos'&&<PosWorkspace session={session} onSignOut={()=>setSession(null)} />}
+      {tab==='pos'&&<PosWorkspace key={syncRevision} session={session} onSignOut={()=>setSession(null)} />}
       {tab==='inventory'&&<InventoryWorkspace session={session} />}
       {tab==='procurement'&&<SuppliersPurchasingWorkspace session={session} />}
       {tab==='customers'&&<CustomersWorkspace session={session} />}
