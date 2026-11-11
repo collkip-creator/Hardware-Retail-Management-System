@@ -95,6 +95,7 @@ export default function DesktopApp() {
   // Keep paired desktops current while signed in; do not require sign-out/sign-in.
   useEffect(() => {
     if (!session || !syncStatus.paired || !online) return;
+    lastCloudVersion.current = syncStatus.lastSyncAt || lastCloudVersion.current;
     let running = false;
     const poll = async () => {
       if (running || !navigator.onLine || document.visibilityState === 'hidden') return;
