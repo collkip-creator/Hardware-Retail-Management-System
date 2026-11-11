@@ -93,6 +93,13 @@ export default function DesktopApp() {
 
   // Keep paired desktops current while signed in; do not require sign-out/sign-in.
   useEffect(() => {
+    if (!session || !syncStatus.paired) return;
+    const onLocalDataChanged = () => { if (navigator.onLine) void syncNow(); };
+    window.addEventListener('hrms:local-data-changed', onLocalDataChanged);
+    return () => window.removeEventListener('hrms:local-data-changed', onLocalDataChanged);
+  }, [session?.staffId, session?.role, syncStatus.paired, syncing]);
+
+  useEffect(() => {
     if (!session || !syncStatus.paired || !online) return;
     lastCloudVersion.current = syncStatus.lastSyncAt || lastCloudVersion.current;
     let running = false;
@@ -169,6 +176,7 @@ export default function DesktopApp() {
   }
 
   async function syncNow() {
+    if (syncing) return;
     setError(''); setNotice(''); setSyncing(true);
     try {
       const result = await invoke<SyncResult>('sync_desktop_workspace');
@@ -301,7 +309,7 @@ export default function DesktopApp() {
         <div className="side-bottom"><span className={online ? 'dot online' : 'dot offline'} />{online ? 'Internet available' : 'Offline mode'}<small>{session.displayName} · {session.role}</small><button className="secondary signout" onClick={() => setSession(null)}>Sign out</button></div>
       </aside>
       <section className="main-area">
-        <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Syncing…':'Sync now'}</button>}{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
+        <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
         {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
         {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
         {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} />}
@@ -323,7 +331,7 @@ export default function DesktopApp() {
       {nav.map(item=><button key={item.id} className={tab===item.id?'nav-item active':'nav-item'} onClick={()=>{setTab(item.id);setError('');setNotice('');}}><span>{item.icon}</span>{item.label}</button>)}
       <div className="side-bottom"><span className={online?'dot online':'dot offline'}/>{online?'Internet available':'Offline mode'}<small>Device {status.deviceId.slice(0,8)}…</small><button className="secondary signout" onClick={()=>setSession(null)}>Sign out</button></div>
     </aside>
-    <section className="main-area"><header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{nav.find(n=>n.id===tab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0,1).toUpperCase()}</span><span>{session.displayName}<small>Business Owner</small></span>{syncStatus.paired&&<button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button>}</div></header>
+    <section className="main-area"><header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{nav.find(n=>n.id===tab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0,1).toUpperCase()}</span><span>{session.displayName}<small>Business Owner</small></span>{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>
       {error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
       {session.role === 'Business Owner' && syncStatus.paired && !syncStatus.licenceActive && <div className="content-card licence-activation-card"><div className="section-heading"><div><h2>{syncStatus.licenceStatus === 'none' ? 'Activate your business licence' : 'Replace your business licence'}</h2><p>{syncStatus.licenceMessage || 'Your business licence is not active. Enter a replacement key below.'} Your existing business data and local accounts will be preserved. You can do this from any authorised computer.</p></div></div><form className="inline-form" onSubmit={activateLicence}><label>Licence key<input value={licenceKey} onChange={e=>setLicenceKey(e.target.value.toUpperCase())} autoComplete="off" placeholder="HRMS-XXXX-XXXX-XXXX-XXXX" required minLength={12} maxLength={100}/></label><button className="primary" type="submit" disabled={busy||!online||licenceKey.trim().length<12}>{busy?'Processing…':syncStatus.licenceStatus === 'none' ? 'Activate licence' : 'Replace licence'}</button></form></div>}
       {!business?<div className="panel"><p>Loading your business workspace…</p></div>:<>
