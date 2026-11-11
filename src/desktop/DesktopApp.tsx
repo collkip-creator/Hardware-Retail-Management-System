@@ -51,7 +51,6 @@ export default function DesktopApp() {
   const [pairingResult, setPairingResult] = useState<PairingCodeResult | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [refreshingLicence, setRefreshingLicence] = useState(false);
-  const [syncRevision, setSyncRevision] = useState(0);
   const lastCloudVersion = useRef('');
 
   useEffect(() => {
@@ -107,7 +106,7 @@ export default function DesktopApp() {
         setSyncStatus(current => ({ ...current, lastSyncAt: result.updatedAt }));
         if (changed) {
           setStatus(await invoke<LocalStatus>('get_local_status'));
-          setSyncRevision(value => value + 1);
+          window.dispatchEvent(new Event('hrms:cloud-sync-complete'));
           if (session.role === 'Business Owner') await refreshWorkspace(session.staffId);
         }
       } catch (e) {
@@ -303,13 +302,13 @@ export default function DesktopApp() {
       </aside>
       <section className="main-area">
         <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Syncing…':'Sync now'}</button>}{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
-        {activeStaffTab === 'catalogue' && <CatalogueWorkspace key={syncRevision} session={session} />}
+        {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
         {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
-        {activeStaffTab === 'inventory' && <InventoryWorkspace key={syncRevision} session={session} />}
-        {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace key={syncRevision} session={session} />}
-        {activeStaffTab === 'customers' && <CustomersWorkspace key={syncRevision} session={session} />}
-        {activeStaffTab === 'accounting' && <AccountingWorkspace key={syncRevision} session={session} />}
-        {activeStaffTab === 'reports' && <ReportsWorkspace key={syncRevision} session={session} />}
+        {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} />}
+        {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace session={session} />}
+        {activeStaffTab === 'customers' && <CustomersWorkspace session={session} />}
+        {activeStaffTab === 'accounting' && <AccountingWorkspace session={session} />}
+        {activeStaffTab === 'reports' && <ReportsWorkspace session={session} />}
       </section>
     </main>;
   }
@@ -334,7 +333,7 @@ export default function DesktopApp() {
         <div className="setup-list"><SetupStep done={business.name!==`${session.displayName}'s Business`} title="Complete business profile" detail="Add your trading name and contact information" onClick={()=>setTab('business')}/><SetupStep done={branches.length>0} title="Register your first branch" detail="Create the main store or first outlet" onClick={()=>setTab('branches')}/><SetupStep done={staff.length>1} title="Add your team" detail="Create staff logins and assign their roles" onClick={()=>setTab('staff')}/></div>
       </>}
       {tab==='catalogue'&&<CatalogueWorkspace session={session} />}
-      {tab==='pos'&&<PosWorkspace key={syncRevision} session={session} onSignOut={()=>setSession(null)} />}
+      {tab==='pos'&&<PosWorkspace session={session} onSignOut={()=>setSession(null)} />}
       {tab==='inventory'&&<InventoryWorkspace session={session} />}
       {tab==='procurement'&&<SuppliersPurchasingWorkspace session={session} />}
       {tab==='customers'&&<CustomersWorkspace session={session} />}
