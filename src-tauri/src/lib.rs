@@ -2195,6 +2195,79 @@ fn build_local_customer_snapshot(connection:&Connection)->Result<Vec<serde_json:
     rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
 }
 
+
+const SYNC_INVENTORY_TABLES: &[&str] = &[
+    "products", "warehouses", "stock_movements", "branch_reorder_levels",
+    "stock_transfers", "stock_transfer_items", "stocktake_sessions", "stocktake_items",
+    "suppliers", "purchase_orders",
+];
+
+fn sqlite_value_to_json(value: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    match value {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(v) => serde_json::json!(v),
+        ValueRef::Real(v) => serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+        ValueRef::Text(v) => serde_json::Value::String(String::from_utf8_lossy(v).into_owned()),
+        ValueRef::Blob(v) => serde_json::Value::Array(v.iter().map(|b| serde_json::json!(*b)).collect()),
+    }
+}
+
+fn json_to_sqlite_value(value: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(v) => Value::Integer(if *v { 1 } else { 0 }),
+        serde_json::Value::Number(v) => if let Some(i) = v.as_i64() { Value::Integer(i) } else { Value::Real(v.as_f64().unwrap_or_default()) },
+        serde_json::Value::String(v) => Value::Text(v.clone()),
+        serde_json::Value::Array(v) => Value::Blob(v.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect()),
+        serde_json::Value::Object(_) => Value::Text(value.to_string()),
+    }
+}
+
+fn build_inventory_snapshot(connection: &Connection) -> Result<serde_json::Value, String> {
+    let mut tables = serde_json::Map::new();
+    for table in SYNC_INVENTORY_TABLES {
+        let mut statement = connection.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).map_err(|e| e.to_string())?;
+        let columns: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows_json = Vec::new();
+        let mut rows = statement.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let mut record = serde_json::Map::new();
+            for (index, column) in columns.iter().enumerate() {
+                record.insert(column.clone(), sqlite_value_to_json(row.get_ref(index).map_err(|e| e.to_string())?));
+            }
+            rows_json.push(serde_json::Value::Object(record));
+        }
+        tables.insert((*table).to_string(), serde_json::Value::Array(rows_json));
+    }
+    Ok(serde_json::Value::Object(tables))
+}
+
+fn apply_inventory_snapshot(transaction: &rusqlite::Transaction<'_>, inventory: &serde_json::Value) -> Result<(), String> {
+    use rusqlite::params_from_iter;
+    for table in SYNC_INVENTORY_TABLES {
+        let Some(records) = inventory.get(*table).and_then(|v| v.as_array()) else { continue; };
+        for record in records {
+            let object = record.as_object().ok_or_else(|| format!("A cloud {table} record is invalid."))?;
+            if object.get("id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                return Err(format!("A cloud {table} record has no valid ID."));
+            }
+            let columns: Vec<String> = object.keys().cloned().collect();
+            let placeholders = (1..=columns.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            let updates = columns.iter().filter(|c| c.as_str() != "id").map(|c| format!("{c}=excluded.{c}")).collect::<Vec<_>>().join(",");
+            let sql = if updates.is_empty() {
+                format!("INSERT OR IGNORE INTO {table} ({}) VALUES ({placeholders})", columns.join(","))
+            } else {
+                format!("INSERT INTO {table} ({}) VALUES ({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}", columns.join(","))
+            };
+            let values: Vec<rusqlite::types::Value> = columns.iter().map(|column| json_to_sqlite_value(&object[column])).collect();
+            transaction.execute(&sql, params_from_iter(values.iter())).map_err(|e| format!("Could not import {table}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, String> {
     let business = connection.query_row(
         "SELECT id,name,currency,timezone,phone,email,address,logo_data_url FROM businesses ORDER BY created_at LIMIT 1",
@@ -2221,7 +2294,8 @@ fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, St
     }))).map_err(|e|e.to_string())?;
     let staff=staff_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let customers=build_local_customer_snapshot(connection)?;
-    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers}))
+    let inventory = build_inventory_snapshot(connection)?;
+    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers,"inventory":inventory,"snapshotVersion":2}))
 }
 
 fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Value) -> Result<(), String> {
@@ -2258,6 +2332,9 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
                 params![id,business_id,branch["name"].as_str().unwrap_or("Branch"),branch["code"].as_str(),branch["status"].as_str().unwrap_or("active")],
             ).map_err(|e|e.to_string())?;
         }
+    }
+    if let Some(inventory) = snapshot.get("inventory") {
+        apply_inventory_snapshot(&tx, inventory)?;
     }
     if let Some(customers)=snapshot["customers"].as_array() {
         for customer in customers {
