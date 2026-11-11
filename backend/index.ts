@@ -399,7 +399,7 @@ export const handler = router({
         return error('Staff synchronisation requires valid account records with Argon2 password hashes. Plaintext passwords are never accepted.', 400);
       }
       const size = new TextEncoder().encode(JSON.stringify(snapshot)).length;
-      if (size > 220000) return error('The business snapshot is too large to synchronise in one request. Reduce logo size or staff records and try again.', 413);
+      if (size > 5000000) return error('The business snapshot exceeds the 5 MB synchronisation limit. Reduce oversized attachments and try again.', 413);
       const targetTable = table(device.userId, 'desktop_sync_state');
       const existing = await db.list(targetTable, { limit: 1 });
       const latestSnapshot = existing.items[0]?.snapshot;
