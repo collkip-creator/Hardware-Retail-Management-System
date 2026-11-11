@@ -2044,6 +2044,60 @@ async fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Re
     })
 }
 
+
+#[tauri::command]
+async fn refresh_desktop_licence_status(
+    database: tauri::State<'_, LocalDatabase>,
+) -> Result<DeviceSyncStatus, String> {
+    let (token, owner, last) = {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        (
+            read_sync_value(&connection, "device_token")?
+                .ok_or_else(|| "This computer is not paired with a licensed business.".to_string())?,
+            read_sync_value(&connection, "owner_device")?.unwrap_or_default() == "true",
+            read_sync_value(&connection, "last_sync_at")?,
+        )
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Could not initialise the licence connection: {e}"))?;
+    let response = client
+        .get(format!("{DESKTOP_API_BASE}/desktop/licences/status"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Could not refresh licence status. Check the internet connection and try again. Details: {e}"))?;
+    let http_status = response.status();
+    let body: serde_json::Value = response.json().await
+        .map_err(|e| format!("The licence service returned an unreadable response: {e}"))?;
+    if !http_status.is_success() {
+        return Err(body.get("error").and_then(|v| v.as_str())
+            .unwrap_or("The licence status could not be refreshed.").to_string());
+    }
+
+    let licence_active = body["licenceActive"].as_bool().unwrap_or(false);
+    let licence_status = body["status"].as_str().unwrap_or("none").to_string();
+    let licence_message = body["message"].as_str().map(str::to_string);
+    let expires_at = body["expiresAt"].as_str().unwrap_or("");
+
+    {
+        let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        write_sync_value(&connection, "licence_status", &licence_status)?;
+        write_sync_value(&connection, "licence_expires_at", expires_at)?;
+    }
+
+    Ok(DeviceSyncStatus {
+        paired: true,
+        owner_device: owner,
+        licence_active,
+        licence_status,
+        licence_message,
+        last_sync_at: last,
+    })
+}
+
 #[tauri::command]
 async fn generate_desktop_pairing_code(
     database: tauri::State<'_, LocalDatabase>,
@@ -3571,6 +3625,7 @@ pub fn run() {
             list_devices,
             change_staff_password,
             get_device_sync_status,
+            refresh_desktop_licence_status,
             activate_desktop_licence,
             pair_desktop_device,
             generate_desktop_pairing_code,
