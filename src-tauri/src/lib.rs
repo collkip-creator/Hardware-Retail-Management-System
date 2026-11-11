@@ -450,6 +450,1141 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         }
     }
 
+    install_licence_write_guards(connection)?;
+
+    Ok(())
+}
+
+// Database-level enforcement is deliberate: it protects every native write path,
+ // including commands that do not pass through the React interface.
+fn install_licence_write_guards(connection: &Connection) -> Result<(), String> {
+    connection.execute_batch(r#"
+CREATE TRIGGER IF NOT EXISTS licence_guard_businesses_insert
+BEFORE INSERT ON businesses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_businesses_update
+BEFORE UPDATE ON businesses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_businesses_delete
+BEFORE DELETE ON businesses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_branches_insert
+BEFORE INSERT ON branches
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_branches_update
+BEFORE UPDATE ON branches
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_branches_delete
+BEFORE DELETE ON branches
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_staff_profiles_insert
+BEFORE INSERT ON staff_profiles
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_staff_profiles_update
+BEFORE UPDATE ON staff_profiles
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_staff_profiles_delete
+BEFORE DELETE ON staff_profiles
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_products_insert
+BEFORE INSERT ON products
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_products_update
+BEFORE UPDATE ON products
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_products_delete
+BEFORE DELETE ON products
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_warehouses_insert
+BEFORE INSERT ON warehouses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_warehouses_update
+BEFORE UPDATE ON warehouses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_warehouses_delete
+BEFORE DELETE ON warehouses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_movements_insert
+BEFORE INSERT ON stock_movements
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_movements_update
+BEFORE UPDATE ON stock_movements
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_movements_delete
+BEFORE DELETE ON stock_movements
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_pos_shifts_insert
+BEFORE INSERT ON pos_shifts
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_pos_shifts_update
+BEFORE UPDATE ON pos_shifts
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_pos_shifts_delete
+BEFORE DELETE ON pos_shifts
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sales_insert
+BEFORE INSERT ON sales
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sales_update
+BEFORE UPDATE ON sales
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sales_delete
+BEFORE DELETE ON sales
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_items_insert
+BEFORE INSERT ON sale_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_items_update
+BEFORE UPDATE ON sale_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_items_delete
+BEFORE DELETE ON sale_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_customers_insert
+BEFORE INSERT ON customers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_customers_update
+BEFORE UPDATE ON customers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_customers_delete
+BEFORE DELETE ON customers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_returns_insert
+BEFORE INSERT ON sale_returns
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_returns_update
+BEFORE UPDATE ON sale_returns
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_returns_delete
+BEFORE DELETE ON sale_returns
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_return_items_insert
+BEFORE INSERT ON sale_return_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_return_items_update
+BEFORE UPDATE ON sale_return_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_sale_return_items_delete
+BEFORE DELETE ON sale_return_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_branch_reorder_levels_insert
+BEFORE INSERT ON branch_reorder_levels
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_branch_reorder_levels_update
+BEFORE UPDATE ON branch_reorder_levels
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_branch_reorder_levels_delete
+BEFORE DELETE ON branch_reorder_levels
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_transfers_insert
+BEFORE INSERT ON stock_transfers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_transfers_update
+BEFORE UPDATE ON stock_transfers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_transfers_delete
+BEFORE DELETE ON stock_transfers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_transfer_items_insert
+BEFORE INSERT ON stock_transfer_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_transfer_items_update
+BEFORE UPDATE ON stock_transfer_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stock_transfer_items_delete
+BEFORE DELETE ON stock_transfer_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stocktake_sessions_insert
+BEFORE INSERT ON stocktake_sessions
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stocktake_sessions_update
+BEFORE UPDATE ON stocktake_sessions
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stocktake_sessions_delete
+BEFORE DELETE ON stocktake_sessions
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stocktake_items_insert
+BEFORE INSERT ON stocktake_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stocktake_items_update
+BEFORE UPDATE ON stocktake_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_stocktake_items_delete
+BEFORE DELETE ON stocktake_items
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_suppliers_insert
+BEFORE INSERT ON suppliers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_suppliers_update
+BEFORE UPDATE ON suppliers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_suppliers_delete
+BEFORE DELETE ON suppliers
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_purchase_orders_insert
+BEFORE INSERT ON purchase_orders
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_purchase_orders_update
+BEFORE UPDATE ON purchase_orders
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_purchase_orders_delete
+BEFORE DELETE ON purchase_orders
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_cashbook_entries_insert
+BEFORE INSERT ON cashbook_entries
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_cashbook_entries_update
+BEFORE UPDATE ON cashbook_entries
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_cashbook_entries_delete
+BEFORE DELETE ON cashbook_entries
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_accounts_insert
+BEFORE INSERT ON accounting_accounts
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_accounts_update
+BEFORE UPDATE ON accounting_accounts
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_accounts_delete
+BEFORE DELETE ON accounting_accounts
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_journal_entries_insert
+BEFORE INSERT ON journal_entries
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_journal_entries_update
+BEFORE UPDATE ON journal_entries
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_journal_entries_delete
+BEFORE DELETE ON journal_entries
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_journal_lines_insert
+BEFORE INSERT ON journal_lines
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_journal_lines_update
+BEFORE UPDATE ON journal_lines
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_journal_lines_delete
+BEFORE DELETE ON journal_lines
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_expenses_insert
+BEFORE INSERT ON accounting_expenses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_expenses_update
+BEFORE UPDATE ON accounting_expenses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_expenses_delete
+BEFORE DELETE ON accounting_expenses
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_cashbook_insert
+BEFORE INSERT ON accounting_cashbook
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_cashbook_update
+BEFORE UPDATE ON accounting_cashbook
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+CREATE TRIGGER IF NOT EXISTS licence_guard_accounting_cashbook_delete
+BEFORE DELETE ON accounting_cashbook
+WHEN EXISTS (SELECT 1 FROM sync_state WHERE key='licence_id' AND trim(value)<>'')
+ AND (
+   lower(COALESCE((SELECT value FROM sync_state WHERE key='licence_status'),'active'))
+     IN ('expired','suspended','revoked','inactive','blocked','disabled')
+   OR (
+     COALESCE((SELECT value FROM sync_state WHERE key='licence_expires_at'),'')<>''
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at')) IS NOT NULL
+     AND datetime((SELECT value FROM sync_state WHERE key='licence_expires_at'))<=CURRENT_TIMESTAMP
+   )
+ )
+BEGIN
+ SELECT RAISE(ABORT,'Licence restricted: this business is in read-only mode. Renew or reactivate the licence to continue.');
+END;
+    "#).map_err(|e| format!("Could not install licence enforcement: {e}"))?;
     Ok(())
 }
 
@@ -2525,6 +3660,37 @@ mod tests {
         assert!(ensure_branch_access(&connection, "owner-a", "branch-a").is_ok());
         assert!(ensure_branch_access(&connection, "owner-a", "branch-b").is_err());
         assert!(ensure_branch_belongs_to_actor_business(&connection, "owner-a", "branch-b").is_err());
+    }
+
+    #[test]
+    fn expired_suspended_and_revoked_licences_block_local_business_writes_without_deleting_data() {
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        initialize_schema(&connection).expect("schema should initialise");
+        connection.execute("INSERT INTO businesses(id,name) VALUES('business-a','Business A')", [])
+            .expect("seed business");
+        connection.execute("INSERT INTO customers(id,business_id,name,phone) VALUES('customer-a','business-a','Existing Customer','0700000000')", [])
+            .expect("seed customer");
+
+        for status in ["expired", "suspended", "revoked"] {
+            write_sync_value(&connection, "licence_id", "licence-test").expect("licence id");
+            write_sync_value(&connection, "licence_status", "active").expect("active status");
+            connection.execute(
+                "INSERT INTO products(id,business_id,name,sku,unit) VALUES(?1,'business-a','Test Product',?1,'Piece')",
+                [format!("product-{status}")],
+            ).expect("active licence permits writes");
+
+            write_sync_value(&connection, "licence_status", status).expect("restricted status");
+            let result = connection.execute(
+                "INSERT INTO customers(id,business_id,name,phone) VALUES(?1,'business-a','Blocked Customer','0711111111')",
+                [format!("blocked-{status}")],
+            );
+            assert!(result.is_err(), "{status} licence must block business writes");
+
+            let preserved: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM customers WHERE id='customer-a'", [], |row| row.get(0)
+            ).expect("read existing customer");
+            assert_eq!(preserved, 1, "existing business data must remain intact");
+        }
     }
 
     #[test]
