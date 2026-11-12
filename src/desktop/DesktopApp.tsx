@@ -51,6 +51,7 @@ export default function DesktopApp() {
   const [pairingResult, setPairingResult] = useState<PairingCodeResult | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [refreshingLicence, setRefreshingLicence] = useState(false);
+  const [inventoryRefreshVersion, setInventoryRefreshVersion] = useState(0);
   const lastCloudVersion = useRef('');
 
   useEffect(() => {
@@ -113,6 +114,7 @@ export default function DesktopApp() {
         setSyncStatus(current => ({ ...current, lastSyncAt: result.updatedAt }));
         if (changed) {
           setStatus(await invoke<LocalStatus>('get_local_status'));
+          setInventoryRefreshVersion(version => version + 1);
           window.dispatchEvent(new Event('hrms:cloud-sync-complete'));
           if (session.role === 'Business Owner') await refreshWorkspace(session.staffId);
         }
@@ -184,6 +186,7 @@ export default function DesktopApp() {
       setSyncStatus({ ...next, lastSyncAt: result.updatedAt });
       lastCloudVersion.current = result.updatedAt;
       setStatus(await invoke<LocalStatus>('get_local_status'));
+      setInventoryRefreshVersion(version => version + 1);
       window.dispatchEvent(new Event('hrms:cloud-sync-complete'));
       if (session?.role === 'Business Owner') await refreshWorkspace(session.staffId);
       setNotice(`Sync complete. ${result.branches} branch(es) and ${result.staff} staff account(s) are in the cloud snapshot.`);
@@ -314,7 +317,7 @@ export default function DesktopApp() {
         <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
         {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
         {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
-        {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} />}
+        {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} refreshVersion={inventoryRefreshVersion} />}
         {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace session={session} />}
         {activeStaffTab === 'customers' && <CustomersWorkspace session={session} />}
         {activeStaffTab === 'accounting' && <AccountingWorkspace session={session} />}
@@ -344,7 +347,7 @@ export default function DesktopApp() {
       </>}
       {tab==='catalogue'&&<CatalogueWorkspace session={session} />}
       {tab==='pos'&&<PosWorkspace session={session} onSignOut={()=>setSession(null)} />}
-      {tab==='inventory'&&<InventoryWorkspace session={session} />}
+      {tab==='inventory'&&<InventoryWorkspace session={session} refreshVersion={inventoryRefreshVersion} />}
       {tab==='procurement'&&<SuppliersPurchasingWorkspace session={session} />}
       {tab==='customers'&&<CustomersWorkspace session={session} />}
       {tab==='accounting'&&<AccountingWorkspace session={session} />}
