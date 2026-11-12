@@ -315,7 +315,7 @@ export default function DesktopApp() {
       </aside>
       <section className="main-area">
         <header className="main-header"><div><span className="eyebrow">HARDWARE RETAIL MANAGEMENT</span><h1>{staffTabs.find(item => item.id === activeStaffTab)?.label}</h1></div><div className="owner-chip"><span className="avatar">{session.displayName.slice(0, 1).toUpperCase()}</span><span>{session.displayName}<small>{session.role}</small></span>{syncStatus.paired&&<><button className="secondary" type="button" onClick={syncNow} disabled={!online||syncing}>{syncing?'Synchronising…':'Sync now'}</button><button className="secondary" type="button" onClick={refreshLicenceStatus} disabled={!online||refreshingLicence}>{refreshingLicence?'Checking licence…':'Refresh licence status'}</button></>}</div></header>{error&&<p className="error global-message">{error}</p>}{notice&&<p className="success global-message">{notice}</p>}
-        {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} />}
+        {activeStaffTab === 'catalogue' && <CatalogueWorkspace session={session} refreshVersion={inventoryRefreshVersion} />}
         {activeStaffTab === 'pos' && <PosWorkspace session={session} onSignOut={() => setSession(null)} />}
         {activeStaffTab === 'inventory' && <InventoryWorkspace session={session} refreshVersion={inventoryRefreshVersion} />}
         {activeStaffTab === 'procurement' && <SuppliersPurchasingWorkspace session={session} />}
@@ -345,7 +345,7 @@ export default function DesktopApp() {
         <div className="section-heading"><div><h2>Getting started</h2><p>Complete these setup steps before daily operations.</p></div></div>
         <div className="setup-list"><SetupStep done={business.name!==`${session.displayName}'s Business`} title="Complete business profile" detail="Add your trading name and contact information" onClick={()=>setTab('business')}/><SetupStep done={branches.length>0} title="Register your first branch" detail="Create the main store or first outlet" onClick={()=>setTab('branches')}/><SetupStep done={staff.length>1} title="Add your team" detail="Create staff logins and assign their roles" onClick={()=>setTab('staff')}/></div>
       </>}
-      {tab==='catalogue'&&<CatalogueWorkspace session={session} />}
+      {tab==='catalogue'&&<CatalogueWorkspace session={session} refreshVersion={inventoryRefreshVersion} />}
       {tab==='pos'&&<PosWorkspace session={session} onSignOut={()=>setSession(null)} />}
       {tab==='inventory'&&<InventoryWorkspace session={session} refreshVersion={inventoryRefreshVersion} />}
       {tab==='procurement'&&<SuppliersPurchasingWorkspace session={session} />}
