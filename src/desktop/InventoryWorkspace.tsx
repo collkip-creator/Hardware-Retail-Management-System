@@ -13,7 +13,7 @@ type Take = { id:string; branchId:string; status:string; createdAt:string; notes
 type Workspace = { role:string; branches:Branch[]; transferBranches:Branch[]; products:Product[]; stock:Stock[]; valuation:Valuation[]; reorderLevels:Level[]; movements:Movement[]; transfers:Transfer[]; stocktakes:Take[] };
 type CountLine = { productId:string; name:string; sku:string; unit:string; systemQuantity:number; countedQuantity:number|null };
 
-export default function InventoryWorkspace({session}:{session:Session}) {
+export default function InventoryWorkspace({session,refreshVersion}:{session:Session;refreshVersion:number}) {
  const [data,setData]=useState<Workspace|null>(null),[branchId,setBranchId]=useState(session.branchId||''),[productId,setProductId]=useState('');
  const [minimum,setMinimum]=useState(''),[maximum,setMaximum]=useState(''),[delta,setDelta]=useState(''),[reason,setReason]=useState('');
  const [fromBranch,setFromBranch]=useState(''),[toBranch,setToBranch]=useState(''),[transferProduct,setTransferProduct]=useState(''),[transferQty,setTransferQty]=useState(''),[transferNotes,setTransferNotes]=useState('');
@@ -22,7 +22,7 @@ export default function InventoryWorkspace({session}:{session:Session}) {
  const canApprove=['Business Owner','Manager'].includes(session.role),canManage=['Business Owner','Manager','Storekeeper'].includes(session.role);
  async function load(){const x=await invoke<Workspace>('get_inventory_workspace',{actorStaffId:session.staffId});setData(x);setBranchId(v=>v||session.branchId||x.branches[0]?.id||'');setFromBranch(v=>v||x.branches[0]?.id||'');setToBranch(v=>v||x.branches.find(b=>b.id!==x.branches[0]?.id)?.id||'');setProductId(v=>v||x.products[0]?.id||'');setTransferProduct(v=>v||x.products[0]?.id||'');}
  useEffect(()=>{load().catch(e=>setError(String(e)));},[session.staffId]);
- useEffect(()=>{const refresh=()=>{load().catch(e=>setError(String(e)));};window.addEventListener('hrms:cloud-sync-complete',refresh);return()=>window.removeEventListener('hrms:cloud-sync-complete',refresh);},[session.staffId]);
+ useEffect(()=>{load().catch(e=>setError(String(e)));},[session.staffId,refreshVersion]);
  const stock=(pid:string,bid:string)=>data?.stock.find(x=>x.productId===pid&&x.branchId===bid)?.quantity||0;
  const totalStockValue=data?.valuation.reduce((sum,v)=>sum+v.stockValue,0)||0;
  const alerts=useMemo(()=>data?.reorderLevels.map(l=>({...l,quantity:stock(l.productId,l.branchId),product:data.products.find(p=>p.id===l.productId),branch:data.branches.find(b=>b.id===l.branchId)})).filter(x=>x.quantity<x.minimumQuantity)||[],[data]);
