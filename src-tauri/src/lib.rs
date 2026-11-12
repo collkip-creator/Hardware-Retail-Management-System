@@ -2298,6 +2298,16 @@ fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, St
     Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers,"inventory":inventory,"snapshotVersion":2}))
 }
 
+
+fn apply_remote_stock_movements(connection: &mut Connection, snapshot: &serde_json::Value) -> Result<(), String> {
+    let Some(records) = snapshot.get("inventory").and_then(|inventory| inventory.get("stock_movements")) else { return Ok(()); };
+    let inventory = serde_json::json!({"stock_movements": records});
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    apply_inventory_snapshot(&tx, &inventory)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Value) -> Result<(), String> {
     let business=snapshot.get("business").ok_or_else(||"The cloud business profile is missing.".to_string())?;
     let business_id=business["id"].as_str().ok_or_else(||"The cloud business ID is invalid.".to_string())?;
@@ -2377,17 +2387,33 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
 
 #[tauri::command]
 async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Result<SyncResult, String> {
-    let (token, owner_device, snapshot, pending_passwords, customers) = {
+    let (token, owner_device, pending_passwords, customers, stock_movements) = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         let token=read_sync_value(&connection,"device_token")?.ok_or_else(||"Pair this computer with the online owner portal first.".to_string())?;
         let owner=read_sync_value(&connection,"owner_device")?.unwrap_or_default()=="true";
-        let snapshot=if owner { Some(build_local_snapshot(&connection)?) } else { None };
         let pending: Vec<serde_json::Value> = read_sync_value(&connection,"pending_password_sync")?
             .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
         let customers=build_local_customer_snapshot(&connection)?;
-        (token,owner,snapshot,pending,customers)
+        let inventory=build_inventory_snapshot(&connection)?;
+        let movements=inventory.get("stock_movements").cloned().unwrap_or_else(||serde_json::json!([]));
+        (token,owner,pending,customers,movements)
     };
     let client=reqwest::Client::new();
+
+    // The owner must first merge staff-originated stock movements from the cloud.
+    // Only append-only movements are merged here; other owner-controlled data remains local.
+    if owner_device {
+        let response=client.get(format!("{DESKTOP_API_BASE}/desktop/sync/pull")).bearer_auth(&token).send().await
+            .map_err(|e|format!("Could not check for staff stock updates: {e}"))?;
+        let status=response.status();
+        let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+        if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Could not download staff stock updates.").to_string());}
+        if let Some(remote)=body.get("snapshot").filter(|v|!v.is_null()) {
+            let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+            apply_remote_stock_movements(&mut connection,remote)?;
+        }
+    }
+
     let mut pending_applied = pending_passwords.is_empty();
     for change in &pending_passwords {
         let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/password")).bearer_auth(&token)
@@ -2400,8 +2426,13 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
             return Err(body["error"].as_str().unwrap_or("The staff password change could not be synchronised.").to_string());
         }
     }
+
     let mut push_snapshot: Option<serde_json::Value> = None;
-    if let Some(snapshot)=snapshot {
+    if owner_device {
+        let snapshot = {
+            let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+            build_local_snapshot(&connection)?
+        };
         let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/push")).bearer_auth(&token)
             .json(&serde_json::json!({"snapshot":snapshot})).send().await
             .map_err(|e|format!("Could not upload this computer's changes: {e}"))?;
@@ -2409,7 +2440,16 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Cloud upload failed.").to_string());}
         push_snapshot=body.get("snapshot").cloned();
         pending_applied = true;
+    } else {
+        // Staff devices may publish stock movements only. The server merges them by ID
+        // and never accepts a staff-authored replacement of the owner business snapshot.
+        let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/inventory")).bearer_auth(&token)
+            .json(&serde_json::json!({"stockMovements":stock_movements})).send().await
+            .map_err(|e|format!("Could not upload staff stock changes: {e}"))?;
+        let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+        if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Staff stock changes could not be uploaded.").to_string());}
     }
+
     if pending_applied && !pending_passwords.is_empty() {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         write_sync_value(&connection,"pending_password_sync","[]")?;
@@ -2425,6 +2465,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
         if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Customer records could not be synchronised.").to_string());}
     }
+
     let response=client.get(format!("{DESKTOP_API_BASE}/desktop/sync/pull")).bearer_auth(&token).send().await
         .map_err(|e|format!("Could not download the latest business data: {e}"))?;
     let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
@@ -2433,7 +2474,10 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
     let updated_at=body["updatedAt"].as_str().unwrap_or("").to_string();
     let branches=remote["branches"].as_array().map(|x|x.len()).unwrap_or(0);
     let staff=remote["staff"].as_array().map(|x|x.len()).unwrap_or(0);
-    if !owner_device {
+    if owner_device {
+        let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
+        apply_remote_stock_movements(&mut connection,remote)?;
+    } else {
         let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         apply_remote_snapshot(&mut connection,remote)?;
     }
@@ -2441,7 +2485,6 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
     write_sync_value(&connection,"last_sync_at",&updated_at)?;
     Ok(SyncResult{owner_device,updated_at,branches,staff})
 }
-
 
 #[tauri::command]
 fn get_pos_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: String) -> Result<serde_json::Value, String> {
