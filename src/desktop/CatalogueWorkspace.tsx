@@ -11,7 +11,7 @@ type Data={role:string;assignedBranchId:string|null;branches:Branch[];products:P
 const CATEGORIES=['All categories','Cement & masonry','Steel & metal','Roofing','Plumbing','Electrical','Timber & boards','Paint & finishes','Fasteners & fittings','Tools & equipment','Safety & protective wear','Doors & household','Agriculture & irrigation','General supplies'];
 const UNITS=['Piece','Bag','Kilogram','Gram','Tonne','Metre','Foot','Roll','Sheet','Length','Litre','Millilitre','Box','Packet','Pair','Set','Dozen'];
 const blank=()=>({name:'',sku:'',unit:'Piece',buyingPrice:'0',sellingPrice:'0',category:'General supplies',brand:'',variant:'',purchaseUnit:'Piece',conversionFactor:'1',barcode:'',reorderLevel:'0',taxCategory:'STANDARD'});
-export default function CatalogueWorkspace({session}:{session:{staffId:string;role:string;branchId:string|null}}){
+export default function CatalogueWorkspace({session,refreshVersion}:{session:{staffId:string;role:string;branchId:string|null};refreshVersion:number}){
  const [data,setData]=useState<Data|null>(null),[search,setSearch]=useState(''),[category,setCategory]=useState('All categories'),[selected,setSelected]=useState(''),[form,setForm]=useState(blank()),[editing,setEditing]=useState(false);
  const [view,setView]=useState<'business'|'master'>('business'),[master,setMaster]=useState<MasterData|null>(null),[masterSearch,setMasterSearch]=useState(''),[masterCategory,setMasterCategory]=useState('All categories'),[masterSelected,setMasterSelected]=useState<string[]>([]),[masterBusy,setMasterBusy]=useState(false),[online,setOnline]=useState(navigator.onLine);
  const [branch,setBranch]=useState(session.branchId||''),[warehouse,setWarehouse]=useState(''),[qty,setQty]=useState(''),[cost,setCost]=useState(''),[reference,setReference]=useState(''),[note,setNote]=useState('');
@@ -32,6 +32,7 @@ export default function CatalogueWorkspace({session}:{session:{staffId:string;ro
   finally{setMasterBusy(false);}
  }
  useEffect(()=>{load().catch(e=>setError(String(e)));loadMaster().catch(e=>setError(String(e)));const onOnline=()=>setOnline(true),onOffline=()=>setOnline(false);window.addEventListener('online',onOnline);window.addEventListener('offline',onOffline);return()=>{window.removeEventListener('online',onOnline);window.removeEventListener('offline',onOffline);};},[session.staffId]);
+ useEffect(()=>{if(refreshVersion>0)load().catch(e=>setError(String(e)));},[refreshVersion]);
  useEffect(()=>{if(!online)return;let cancelled=false;(async()=>{try{const status=await invoke<{paired:boolean}>('get_device_sync_status');if(status.paired&&!cancelled){await invoke('sync_master_catalogue');if(!cancelled)await loadMaster();}}catch{/* Keep the last successful local catalogue available offline. */}})();return()=>{cancelled=true;};},[online,session.staffId]);
  const masterProducts=useMemo(()=>master?.items.filter(p=>(masterCategory==='All categories'||p.category===masterCategory)&&[p.name,p.sku,p.brand||'',p.specification||'',p.productFamily||'',p.barcode||''].join(' ').toLowerCase().includes(masterSearch.toLowerCase()))||[],[master,masterCategory,masterSearch]);
  const products=useMemo(()=>data?.products.filter(p=>(category==='All categories'||p.category===category)&&[p.name,p.sku,p.brand||'',p.variant||'',p.barcode||''].join(' ').toLowerCase().includes(search.toLowerCase()))||[],[data,category,search]);
