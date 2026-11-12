@@ -384,6 +384,65 @@ export const handler = router({
       return json({ ok: true, updatedAt, count: snapshot.customers.length });
     },
   ],
+  'POST /api/desktop/sync/inventory': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      if (device.ownerDevice) return error('The primary owner computer must publish the complete business snapshot.', 403);
+      const body = (ctx.body || {}) as Record<string, any>;
+      const incoming = body.stockMovements;
+      if (!Array.isArray(incoming) || incoming.length > 10000) return error('The stock movement batch is invalid or exceeds 10,000 records.', 400);
+      if (new TextEncoder().encode(JSON.stringify(body)).length > 5000000) return error('The stock movement batch exceeds the 5 MB limit.', 413);
+
+      const targetTable = table(device.userId, 'desktop_sync_state');
+      const existing = await db.list(targetTable, { limit: 1 });
+      const current = existing.items[0];
+      const snapshot = current?.snapshot;
+      if (!snapshot?.business?.id || !snapshot.inventory || !Array.isArray(snapshot.inventory.stock_movements)) {
+        return error('The owner computer must publish the initial business inventory before staff stock changes can sync.', 409);
+      }
+      const branches = new Set((Array.isArray(snapshot.branches) ? snapshot.branches : []).map((item: any) => item.id));
+      const products = new Set((Array.isArray(snapshot.inventory.products) ? snapshot.inventory.products : []).map((item: any) => item.id));
+      const warehouses = new Map((Array.isArray(snapshot.inventory.warehouses) ? snapshot.inventory.warehouses : []).map((item: any) => [item.id, item.branch_id]));
+      const staff = new Map((Array.isArray(snapshot.staff) ? snapshot.staff : []).map((item: any) => [item.profile?.id, item.profile]));
+      const existingIds = new Set(snapshot.inventory.stock_movements.map((item: any) => item.id));
+      const additions: any[] = [];
+      const batchIds = new Set<string>();
+      for (const movement of incoming) {
+        const id = typeof movement?.id === 'string' ? movement.id : '';
+        const productId = typeof movement?.product_id === 'string' ? movement.product_id : '';
+        const branchId = typeof movement?.branch_id === 'string' ? movement.branch_id : '';
+        const actorId = typeof movement?.actor_staff_id === 'string' ? movement.actor_staff_id : '';
+        const movementType = movement?.movement_type;
+        const quantity = Number(movement?.quantity);
+        const delta = Number(movement?.quantity_delta);
+        if (!id || !productId || !branchId || !actorId || !['RECEIPT', 'SALE', 'RETURN', 'ADJUSTMENT'].includes(movementType) ||
+            !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(delta) || delta === 0) {
+          return error('A stock movement is missing valid identity, type, branch, product or quantity data.', 400);
+        }
+        if (!branches.has(branchId) || !products.has(productId)) return error('A stock movement references a product or branch outside this business.', 403);
+        const profile: any = staff.get(actorId);
+        if (!profile || profile.status !== 'active') return error('A stock movement references an inactive or unknown staff account.', 403);
+        if (profile.branchId && profile.branchId !== branchId) return error('A staff account cannot sync stock movements for another assigned branch.', 403);
+        if (movementType === 'ADJUSTMENT' && !['Business Owner', 'Manager'].includes(profile.role)) {
+          return error('Only a Business Owner or Manager may sync stock adjustments.', 403);
+        }
+        if (movement.warehouse_id && warehouses.get(movement.warehouse_id) !== branchId) {
+          return error('A stock movement references a warehouse outside its branch.', 403);
+        }
+        if (!existingIds.has(id) && !batchIds.has(id)) {
+          additions.push(movement);
+          batchIds.add(id);
+        }
+      }
+      if (additions.length) snapshot.inventory.stock_movements.push(...additions);
+      const updatedAt = new Date().toISOString();
+      const saved = { ...current, snapshot, updatedAt, updatedByDeviceId: device.deviceId, revision: Number(current.revision || 0) + 1 };
+      const [ok] = await db.update(targetTable, [{ id: current.id, record: saved }]);
+      if (!ok) return error('Staff stock movements could not be saved to the cloud. Please retry.', 500);
+      return json({ ok: true, updatedAt, revision: saved.revision, received: incoming.length, added: additions.length });
+    },
+  ],
   'POST /api/desktop/sync/push': [
     async ctx => {
       const device = await authenticatedDesktop(ctx);
