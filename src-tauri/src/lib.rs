@@ -2202,6 +2202,14 @@ const SYNC_INVENTORY_TABLES: &[&str] = &[
     "suppliers", "purchase_orders",
 ];
 
+// POS-originated financial records are synchronised separately from owner-controlled
+// accounting configuration. They are append-only except for the monotonic OPEN -> CLOSED
+// shift transition.
+const SYNC_FINANCIAL_TABLES: &[&str] = &[
+    "pos_shifts", "sales", "sale_items", "sale_returns", "sale_return_items",
+    "cashbook_entries", "journal_entries", "journal_lines",
+];
+
 fn sqlite_value_to_json(value: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
     use rusqlite::types::ValueRef;
     match value {
@@ -2268,6 +2276,67 @@ fn apply_inventory_snapshot(transaction: &rusqlite::Transaction<'_>, inventory: 
     Ok(())
 }
 
+fn build_financial_snapshot(connection: &Connection) -> Result<serde_json::Value, String> {
+    let mut tables = serde_json::Map::new();
+    for table in SYNC_FINANCIAL_TABLES {
+        let mut statement = connection.prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .map_err(|e| e.to_string())?;
+        let columns: Vec<String> = statement.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows_json = Vec::new();
+        let mut rows = statement.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let mut record = serde_json::Map::new();
+            for (index, column) in columns.iter().enumerate() {
+                record.insert(column.clone(), sqlite_value_to_json(row.get_ref(index).map_err(|e| e.to_string())?));
+            }
+            rows_json.push(serde_json::Value::Object(record));
+        }
+        tables.insert((*table).to_string(), serde_json::Value::Array(rows_json));
+    }
+    Ok(serde_json::Value::Object(tables))
+}
+
+fn apply_financial_snapshot(transaction: &rusqlite::Transaction<'_>, financial: &serde_json::Value) -> Result<(), String> {
+    use rusqlite::params_from_iter;
+    for table in SYNC_FINANCIAL_TABLES {
+        let Some(records) = financial.get(*table).and_then(|v| v.as_array()) else { continue; };
+        for record in records {
+            let object = record.as_object().ok_or_else(|| format!("A cloud {table} record is invalid."))?;
+            if object.get("id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+                return Err(format!("A cloud {table} record has no valid ID."));
+            }
+            let columns: Vec<String> = object.keys().cloned().collect();
+            let placeholders = (1..=columns.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+            let values: Vec<rusqlite::types::Value> = columns.iter()
+                .map(|column| json_to_sqlite_value(&object[column])).collect();
+            let sql = if *table == "pos_shifts" {
+                format!(
+                    "INSERT INTO {table} ({}) VALUES ({placeholders})
+                     ON CONFLICT(id) DO UPDATE SET
+                     status=CASE WHEN excluded.status='CLOSED' THEN 'CLOSED' ELSE pos_shifts.status END,
+                     closing_cash=COALESCE(excluded.closing_cash,pos_shifts.closing_cash),
+                     closing_mpesa=COALESCE(excluded.closing_mpesa,pos_shifts.closing_mpesa),
+                     closed_at=COALESCE(excluded.closed_at,pos_shifts.closed_at)",
+                    columns.join(",")
+                )
+            } else {
+                format!("INSERT OR IGNORE INTO {table} ({}) VALUES ({placeholders})", columns.join(","))
+            };
+            transaction.execute(&sql, params_from_iter(values.iter()))
+                .map_err(|e| format!("Could not import {table}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_remote_financial_records(connection: &mut Connection, snapshot: &serde_json::Value) -> Result<(), String> {
+    let Some(financial) = snapshot.get("financial") else { return Ok(()); };
+    let tx = connection.transaction().map_err(|e| e.to_string())?;
+    apply_financial_snapshot(&tx, financial)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, String> {
     let business = connection.query_row(
         "SELECT id,name,currency,timezone,phone,email,address,logo_data_url FROM businesses ORDER BY created_at LIMIT 1",
@@ -2295,7 +2364,8 @@ fn build_local_snapshot(connection: &Connection) -> Result<serde_json::Value, St
     let staff=staff_rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let customers=build_local_customer_snapshot(connection)?;
     let inventory = build_inventory_snapshot(connection)?;
-    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers,"inventory":inventory,"snapshotVersion":2}))
+    let financial = build_financial_snapshot(connection)?;
+    Ok(serde_json::json!({"business":business,"branches":branches,"staff":staff,"customers":customers,"inventory":inventory,"financial":financial,"snapshotVersion":3}))
 }
 
 
@@ -2346,6 +2416,9 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
     if let Some(inventory) = snapshot.get("inventory") {
         apply_inventory_snapshot(&tx, inventory)?;
     }
+    if let Some(financial) = snapshot.get("financial") {
+        apply_financial_snapshot(&tx, financial)?;
+    }
     if let Some(customers)=snapshot["customers"].as_array() {
         for customer in customers {
             let id=customer["id"].as_str().ok_or_else(||"A cloud customer has no ID.".to_string())?;
@@ -2387,7 +2460,7 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
 
 #[tauri::command]
 async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Result<SyncResult, String> {
-    let (token, owner_device, pending_passwords, customers, stock_movements) = {
+    let (token, owner_device, pending_passwords, customers, stock_movements, financial) = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         let token=read_sync_value(&connection,"device_token")?.ok_or_else(||"Pair this computer with the online owner portal first.".to_string())?;
         let owner=read_sync_value(&connection,"owner_device")?.unwrap_or_default()=="true";
@@ -2396,7 +2469,8 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         let customers=build_local_customer_snapshot(&connection)?;
         let inventory=build_inventory_snapshot(&connection)?;
         let movements=inventory.get("stock_movements").cloned().unwrap_or_else(||serde_json::json!([]));
-        (token,owner,pending,customers,movements)
+        let financial=build_financial_snapshot(&connection)?;
+        (token,owner,pending,customers,movements,financial)
     };
     let client=reqwest::Client::new();
 
@@ -2411,6 +2485,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         if let Some(remote)=body.get("snapshot").filter(|v|!v.is_null()) {
             let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
             apply_remote_stock_movements(&mut connection,remote)?;
+            apply_remote_financial_records(&mut connection,remote)?;
         }
     }
 
@@ -2441,13 +2516,20 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         push_snapshot=body.get("snapshot").cloned();
         pending_applied = true;
     } else {
-        // Staff devices may publish stock movements only. The server merges them by ID
-        // and never accepts a staff-authored replacement of the owner business snapshot.
+        // Staff devices publish only append-only operational records. The server validates
+        // staff identity, branch ownership and transaction relationships; it never accepts
+        // a staff-authored replacement of the owner business snapshot.
         let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/inventory")).bearer_auth(&token)
             .json(&serde_json::json!({"stockMovements":stock_movements})).send().await
             .map_err(|e|format!("Could not upload staff stock changes: {e}"))?;
         let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
         if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Staff stock changes could not be uploaded.").to_string());}
+
+        let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/transactions")).bearer_auth(&token)
+            .json(&serde_json::json!({"financial":financial})).send().await
+            .map_err(|e|format!("Could not upload staff POS transactions: {e}"))?;
+        let status=response.status(); let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
+        if !status.is_success(){return Err(body["error"].as_str().unwrap_or("Staff POS transactions could not be uploaded.").to_string());}
     }
 
     if pending_applied && !pending_passwords.is_empty() {
@@ -2477,6 +2559,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
     if owner_device {
         let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         apply_remote_stock_movements(&mut connection,remote)?;
+        apply_remote_financial_records(&mut connection,remote)?;
     } else {
         let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         apply_remote_snapshot(&mut connection,remote)?;
