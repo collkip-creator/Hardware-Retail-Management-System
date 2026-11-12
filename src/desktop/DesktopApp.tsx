@@ -182,7 +182,9 @@ export default function DesktopApp() {
       const result = await invoke<SyncResult>('sync_desktop_workspace');
       const next = await invoke<SyncStatus>('get_device_sync_status');
       setSyncStatus({ ...next, lastSyncAt: result.updatedAt });
+      lastCloudVersion.current = result.updatedAt;
       setStatus(await invoke<LocalStatus>('get_local_status'));
+      window.dispatchEvent(new Event('hrms:cloud-sync-complete'));
       if (session?.role === 'Business Owner') await refreshWorkspace(session.staffId);
       setNotice(`Sync complete. ${result.branches} branch(es) and ${result.staff} staff account(s) are in the cloud snapshot.`);
     } catch (e) { setError(String(e).replace(/^Error: /, '')); }
