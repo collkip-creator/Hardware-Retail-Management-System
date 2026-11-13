@@ -3089,21 +3089,81 @@ fn save_accounting_expense(database:tauri::State<'_,LocalDatabase>,actor_staff_i
 }
 fn chrono_free_today()->String{let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();let days=(now/86400) as i64;let z=days+719468;let era=(if z>=0{z}else{z-146096})/146097;let doe=z-era*146097;let yoe=(doe-doe/1460+doe/36524-doe/146096)/365;let mut y=yoe+era*400;let doy=doe-(365*yoe+yoe/4-yoe/100);let mp=(5*doy+2)/153;let d=doy-(153*mp+2)/5+1;let m=mp+if mp<10{3}else{-9};if m<=2{y+=1;}format!("{:04}-{:02}-{:02}",y,m,d)}
 #[tauri::command]
-fn save_accounting_cashbook(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,direction:String,description:String,amount:f64,payment_method:String,account_code:String,reference:String,date:String)->Result<serde_json::Value,String>{
-    let direction=direction.trim().to_uppercase();let method=payment_method.trim().to_uppercase();let code=account_code.trim();let description=description.trim();
-    if !["RECEIPT","PAYMENT"].contains(&direction.as_str())||description.is_empty()||description.len()>180||!amount.is_finite()||amount<=0.0||!["CASH","MPESA","BANK"].contains(&method.as_str()){return Err("Enter a valid cashbook direction, description, amount and payment account.".into());}
-    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;let (_,_,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Accountant"])?;
-    let cash=match method.as_str(){"CASH"=>"1000","MPESA"=>"1010",_=>"1020"};
-    ensure_local_accounting_accounts(&c,&business)?;
-    let valid:i64=c.query_row("SELECT COUNT(*) FROM accounting_accounts WHERE business_id=?1 AND code=?2 AND active=1 AND code NOT IN ('1000','1010','1020')",params![business,code],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if valid==0{return Err("Select an active offset account different from the cash/bank account.".into());}
-    let amount=(amount*100.0).round()/100.0;let id=Uuid::new_v4().to_string();let date=if date.trim().is_empty(){chrono_free_today()}else{date};
-    let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
-    tx.execute("INSERT INTO accounting_cashbook(id,business_id,direction,description,amount,payment_method,account_code,reference,entry_date,actor_staff_id,branch_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT branch_id FROM staff_profiles WHERE id=?10))",params![id,business,direction,description,amount,method,code,reference.trim(),date,actor_staff_id]).map_err(|e|e.to_string())?;
-    let lines=if direction=="RECEIPT"{vec![(cash.to_string(),amount,0.0),(code.to_string(),0.0,amount)]}else{vec![(code.to_string(),amount,0.0),(cash.to_string(),0.0,amount)]};
-    post_local_journal(&tx,&business,&actor_staff_id,"CASHBOOK",&id,if reference.trim().is_empty(){&id}else{reference.trim()},&format!("Cashbook {}: {}",direction.to_lowercase(),description),&date,lines)?;
-    tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'ACCOUNTING_CASHBOOK_POSTED','cashbook',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
-    tx.commit().map_err(|e|e.to_string())?;Ok(serde_json::json!({"id":id,"amount":amount,"status":"POSTED"}))
+fn save_accounting_cashbook(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+    direction: String,
+    description: String,
+    amount: f64,
+    payment_method: String,
+    account_code: String,
+    reference: String,
+    date: String,
+    branch_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let direction = direction.trim().to_uppercase();
+    let method = payment_method.trim().to_uppercase();
+    let code = account_code.trim();
+    let description = description.trim();
+    if !["RECEIPT", "PAYMENT"].contains(&direction.as_str()) ||
+        description.is_empty() || description.len() > 180 ||
+        !amount.is_finite() || amount <= 0.0 ||
+        !["CASH", "MPESA", "BANK"].contains(&method.as_str()) {
+        return Err("Enter a valid cashbook direction, description, amount and payment account.".into());
+    }
+    let c = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let (role, assigned_branch, business) =
+        procurement_actor(&c, &actor_staff_id, &["Business Owner", "Manager", "Accountant"])?;
+    if role != "Business Owner" &&
+        branch_id.as_deref().is_some_and(|selected| Some(selected) != assigned_branch.as_deref()) {
+        return Err("You can only post cashbook entries to your assigned branch.".into());
+    }
+    let resolved_branch = if role == "Business Owner" { branch_id.or(assigned_branch) } else { assigned_branch };
+    if role != "Business Owner" && resolved_branch.is_none() {
+        return Err("Your staff account must be assigned to a branch before posting a cashbook entry.".into());
+    }
+    if let Some(ref selected) = resolved_branch {
+        let valid_branch: i64 = c.query_row(
+            "SELECT COUNT(*) FROM branches WHERE id=?1 AND business_id=?2 AND status='active'",
+            params![selected, business], |r| r.get(0)
+        ).map_err(|e| e.to_string())?;
+        if valid_branch == 0 { return Err("Select an active branch belonging to this business.".into()); }
+    }
+    let cash = match method.as_str() { "CASH" => "1000", "MPESA" => "1010", _ => "1020" };
+    ensure_local_accounting_accounts(&c, &business)?;
+    let valid: i64 = c.query_row(
+        "SELECT COUNT(*) FROM accounting_accounts WHERE business_id=?1 AND code=?2 AND active=1 AND code NOT IN ('1000','1010','1020')",
+        params![business, code], |r| r.get(0)
+    ).map_err(|e| e.to_string())?;
+    if valid == 0 { return Err("Select an active offset account different from the cash/bank account.".into()); }
+    let amount = (amount * 100.0).round() / 100.0;
+    let id = Uuid::new_v4().to_string();
+    let date = if date.trim().is_empty() { chrono_free_today() } else { date };
+    let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO accounting_cashbook(id,business_id,direction,description,amount,payment_method,account_code,reference,entry_date,actor_staff_id,branch_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![id,business,direction,description,amount,method,code,reference.trim(),date,actor_staff_id,resolved_branch]
+    ).map_err(|e| e.to_string())?;
+    let lines = if direction == "RECEIPT" {
+        vec![(cash.to_string(),amount,0.0),(code.to_string(),0.0,amount)]
+    } else {
+        vec![(code.to_string(),amount,0.0),(cash.to_string(),0.0,amount)]
+    };
+    let journal_id = post_local_journal(
+        &tx,&business,&actor_staff_id,"CASHBOOK",&id,
+        if reference.trim().is_empty() { &id } else { reference.trim() },
+        &format!("Cashbook {}: {}",direction.to_lowercase(),description),&date,lines
+    )?;
+    tx.execute("UPDATE journal_entries SET branch_id=?1 WHERE id=?2",params![resolved_branch,journal_id])
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id)
+         VALUES(?1,?2,'ACCOUNTING_CASHBOOK_POSTED','cashbook',?3)",
+        params![Uuid::new_v4().to_string(),actor_staff_id,id]
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"id":id,"amount":amount,"branchId":resolved_branch,"status":"POSTED"}))
 }
 #[tauri::command]
 fn post_accounting_opening_balances(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,effective_date:String,balances:Vec<serde_json::Value>)->Result<serde_json::Value,String>{
