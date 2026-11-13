@@ -2498,11 +2498,19 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         // Staff devices upload POS records plus branch-attributed manual cashbook entries.
         // The server validates the entry's actor, business, branch and balanced journal.
         if !owner {
+            let allowed_cashbook_actors: std::collections::HashSet<String> = {
+                let mut statement=connection.prepare(
+                    "SELECT id FROM staff_profiles WHERE status='active' AND role<>'Business Owner' AND branch_id IS NOT NULL"
+                ).map_err(|e|e.to_string())?;
+                let rows=statement.query_map([],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?;
+                rows.collect::<Result<std::collections::HashSet<_>,_>>().map_err(|e|e.to_string())?
+            };
             let mut branch_cashbook_ids=std::collections::HashSet::new();
             if let Some(entries)=financial.get_mut("accounting_cashbook").and_then(|v|v.as_array_mut()) {
                 entries.retain(|entry| {
                     let is_branch_entry=entry.get("branch_id").and_then(|v|v.as_str()).is_some()
-                        && entry.get("actor_staff_id").and_then(|v|v.as_str()).is_some();
+                        && entry.get("actor_staff_id").and_then(|v|v.as_str())
+                            .is_some_and(|actor|allowed_cashbook_actors.contains(actor));
                     if is_branch_entry {
                         if let Some(id)=entry.get("id").and_then(|v|v.as_str()) { branch_cashbook_ids.insert(id.to_string()); }
                     }
