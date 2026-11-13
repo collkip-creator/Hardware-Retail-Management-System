@@ -446,6 +446,14 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         "UPDATE journal_entries SET branch_id=(SELECT branch_id FROM staff_profiles WHERE id=journal_entries.actor_staff_id) WHERE branch_id IS NULL",
         []
     ).map_err(|e| e.to_string())?;
+    connection.execute(
+        "UPDATE journal_entries SET branch_id=(SELECT branch_id FROM sales WHERE sales.id=journal_entries.source_id) WHERE source_type='SALE' AND branch_id IS NULL",
+        []
+    ).map_err(|e| e.to_string())?;
+    connection.execute(
+        "UPDATE journal_entries SET branch_id=(SELECT branch_id FROM sale_returns WHERE sale_returns.id=journal_entries.source_id) WHERE source_type='RETURN' AND branch_id IS NULL",
+        []
+    ).map_err(|e| e.to_string())?;
 
     // Ensure every existing active branch has a receiving warehouse.
     let branch_ids = {
