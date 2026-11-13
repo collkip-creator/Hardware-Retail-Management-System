@@ -2469,7 +2469,35 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         let customers=build_local_customer_snapshot(&connection)?;
         let inventory=build_inventory_snapshot(&connection)?;
         let movements=inventory.get("stock_movements").cloned().unwrap_or_else(||serde_json::json!([]));
-        let financial=build_financial_snapshot(&connection)?;
+        let mut financial=build_financial_snapshot(&connection)?;
+        // Staff devices may upload only POS-originated cashbook and journal records.
+        // Their local database also contains purchasing, expense, opening-balance and
+        // other owner/accountant journals, which must never enter the staff POS endpoint.
+        if !owner {
+            if let Some(entries)=financial.get_mut("cashbook_entries").and_then(|v|v.as_array_mut()) {
+                entries.retain(|entry| {
+                    matches!(entry.get("source_type").and_then(|v|v.as_str()), Some("POS_SALE") | Some("POS_RETURN"))
+                });
+            }
+            let mut pos_journal_ids=std::collections::HashSet::new();
+            if let Some(entries)=financial.get_mut("journal_entries").and_then(|v|v.as_array_mut()) {
+                entries.retain(|entry| {
+                    let is_pos=matches!(entry.get("source_type").and_then(|v|v.as_str()), Some("SALE") | Some("RETURN"));
+                    if is_pos {
+                        if let Some(id)=entry.get("id").and_then(|v|v.as_str()) {
+                            pos_journal_ids.insert(id.to_string());
+                        }
+                    }
+                    is_pos
+                });
+            }
+            if let Some(lines)=financial.get_mut("journal_lines").and_then(|v|v.as_array_mut()) {
+                lines.retain(|line| {
+                    line.get("journal_id").and_then(|v|v.as_str())
+                        .is_some_and(|id|pos_journal_ids.contains(id))
+                });
+            }
+        }
         (token,owner,pending,customers,movements,financial)
     };
     let client=reqwest::Client::new();
