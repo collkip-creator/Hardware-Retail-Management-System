@@ -2487,32 +2487,39 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Re
         let inventory=build_inventory_snapshot(&connection)?;
         let movements=inventory.get("stock_movements").cloned().unwrap_or_else(||serde_json::json!([]));
         let mut financial=build_financial_snapshot(&connection)?;
-        // Staff devices may upload only POS-originated cashbook and journal records.
-        // Their local database also contains purchasing, expense, opening-balance and
-        // other owner/accountant journals, which must never enter the staff POS endpoint.
+        // Staff devices upload POS records plus branch-attributed manual cashbook entries.
+        // The server validates the entry's actor, business, branch and balanced journal.
         if !owner {
-            if let Some(entries)=financial.get_mut("cashbook_entries").and_then(|v|v.as_array_mut()) {
+            let mut branch_cashbook_ids=std::collections::HashSet::new();
+            if let Some(entries)=financial.get_mut("accounting_cashbook").and_then(|v|v.as_array_mut()) {
                 entries.retain(|entry| {
-                    matches!(entry.get("source_type").and_then(|v|v.as_str()), Some("POS_SALE") | Some("POS_RETURN"))
+                    let is_branch_entry=entry.get("branch_id").and_then(|v|v.as_str()).is_some()
+                        && entry.get("actor_staff_id").and_then(|v|v.as_str()).is_some();
+                    if is_branch_entry {
+                        if let Some(id)=entry.get("id").and_then(|v|v.as_str()) { branch_cashbook_ids.insert(id.to_string()); }
+                    }
+                    is_branch_entry
                 });
             }
-            let mut pos_journal_ids=std::collections::HashSet::new();
+            if let Some(entries)=financial.get_mut("cashbook_entries").and_then(|v|v.as_array_mut()) {
+                entries.retain(|entry| matches!(entry.get("source_type").and_then(|v|v.as_str()), Some("POS_SALE") | Some("POS_RETURN")));
+            }
+            let mut allowed_journal_ids=std::collections::HashSet::new();
             if let Some(entries)=financial.get_mut("journal_entries").and_then(|v|v.as_array_mut()) {
                 entries.retain(|entry| {
-                    let is_pos=matches!(entry.get("source_type").and_then(|v|v.as_str()), Some("SALE") | Some("RETURN"));
-                    if is_pos {
-                        if let Some(id)=entry.get("id").and_then(|v|v.as_str()) {
-                            pos_journal_ids.insert(id.to_string());
-                        }
+                    let source_type=entry.get("source_type").and_then(|v|v.as_str()).unwrap_or("");
+                    let source_id=entry.get("source_id").and_then(|v|v.as_str()).unwrap_or("");
+                    let allowed=matches!(source_type,"SALE"|"RETURN")
+                        || (source_type=="CASHBOOK" && branch_cashbook_ids.contains(source_id));
+                    if allowed {
+                        if let Some(id)=entry.get("id").and_then(|v|v.as_str()) { allowed_journal_ids.insert(id.to_string()); }
                     }
-                    is_pos
+                    allowed
                 });
             }
             if let Some(lines)=financial.get_mut("journal_lines").and_then(|v|v.as_array_mut()) {
-                lines.retain(|line| {
-                    line.get("journal_id").and_then(|v|v.as_str())
-                        .is_some_and(|id|pos_journal_ids.contains(id))
-                });
+                lines.retain(|line| line.get("journal_id").and_then(|v|v.as_str())
+                    .is_some_and(|id|allowed_journal_ids.contains(id)));
             }
         }
         (token,owner,pending,customers,movements,financial)
@@ -3092,7 +3099,7 @@ fn save_accounting_cashbook(database:tauri::State<'_,LocalDatabase>,actor_staff_
     if valid==0{return Err("Select an active offset account different from the cash/bank account.".into());}
     let amount=(amount*100.0).round()/100.0;let id=Uuid::new_v4().to_string();let date=if date.trim().is_empty(){chrono_free_today()}else{date};
     let tx=c.unchecked_transaction().map_err(|e|e.to_string())?;
-    tx.execute("INSERT INTO accounting_cashbook(id,business_id,direction,description,amount,payment_method,account_code,reference,entry_date,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![id,business,direction,description,amount,method,code,reference.trim(),date,actor_staff_id]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO accounting_cashbook(id,business_id,direction,description,amount,payment_method,account_code,reference,entry_date,actor_staff_id,branch_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,(SELECT branch_id FROM staff_profiles WHERE id=?10))",params![id,business,direction,description,amount,method,code,reference.trim(),date,actor_staff_id]).map_err(|e|e.to_string())?;
     let lines=if direction=="RECEIPT"{vec![(cash.to_string(),amount,0.0),(code.to_string(),0.0,amount)]}else{vec![(code.to_string(),amount,0.0),(cash.to_string(),0.0,amount)]};
     post_local_journal(&tx,&business,&actor_staff_id,"CASHBOOK",&id,if reference.trim().is_empty(){&id}else{reference.trim()},&format!("Cashbook {}: {}",direction.to_lowercase(),description),&date,lines)?;
     tx.execute("INSERT INTO audit_events(id,actor_staff_id,event_type,entity_type,entity_id) VALUES(?1,?2,'ACCOUNTING_CASHBOOK_POSTED','cashbook',?3)",params![Uuid::new_v4().to_string(),actor_staff_id,id]).map_err(|e|e.to_string())?;
