@@ -406,7 +406,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             source_type TEXT NOT NULL, source_id TEXT NOT NULL, source_key TEXT NOT NULL,
             reference TEXT NOT NULL, description TEXT NOT NULL, entry_date TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'POSTED', total_debit REAL NOT NULL,
-            total_credit REAL NOT NULL, actor_staff_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            total_credit REAL NOT NULL, actor_staff_id TEXT, branch_id TEXT REFERENCES branches(id),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(business_id,source_key)
         );
         CREATE TABLE IF NOT EXISTS journal_lines (
@@ -426,9 +427,25 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             id TEXT PRIMARY KEY, business_id TEXT NOT NULL REFERENCES businesses(id),
             direction TEXT NOT NULL, description TEXT NOT NULL, amount REAL NOT NULL,
             payment_method TEXT NOT NULL, account_code TEXT NOT NULL, reference TEXT,
-            entry_date TEXT NOT NULL, actor_staff_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            entry_date TEXT NOT NULL, actor_staff_id TEXT, branch_id TEXT REFERENCES branches(id),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
     ").map_err(|e| e.to_string())?;
+
+    for (table, column) in [("journal_entries", "branch_id"), ("accounting_cashbook", "branch_id")] {
+        if !has_column(connection, table, column)? {
+            connection.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN branch_id TEXT REFERENCES branches(id);"))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    connection.execute(
+        "UPDATE accounting_cashbook SET branch_id=(SELECT branch_id FROM staff_profiles WHERE id=accounting_cashbook.actor_staff_id) WHERE branch_id IS NULL",
+        []
+    ).map_err(|e| e.to_string())?;
+    connection.execute(
+        "UPDATE journal_entries SET branch_id=(SELECT branch_id FROM staff_profiles WHERE id=journal_entries.actor_staff_id) WHERE branch_id IS NULL",
+        []
+    ).map_err(|e| e.to_string())?;
 
     // Ensure every existing active branch has a receiving warehouse.
     let branch_ids = {
@@ -2207,7 +2224,7 @@ const SYNC_INVENTORY_TABLES: &[&str] = &[
 // shift transition.
 const SYNC_FINANCIAL_TABLES: &[&str] = &[
     "pos_shifts", "sales", "sale_items", "sale_returns", "sale_return_items",
-    "cashbook_entries", "journal_entries", "journal_lines",
+    "cashbook_entries", "accounting_cashbook", "journal_entries", "journal_lines",
 ];
 
 fn sqlite_value_to_json(value: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
@@ -2909,7 +2926,7 @@ fn post_local_journal(c:&Connection,business_id:&str,actor:&str,source_type:&str
     let credit=(lines.iter().map(|x|x.2).sum::<f64>()*100.0).round()/100.0;
     if lines.len()<2||debit<=0.0||(debit-credit).abs()>0.01{return Err("Accounting entry rejected: journal debits and credits must balance.".into());}
     let id=Uuid::new_v4().to_string();
-    c.execute("INSERT INTO journal_entries(id,business_id,source_type,source_id,source_key,reference,description,entry_date,total_debit,total_credit,actor_staff_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    c.execute("INSERT INTO journal_entries(id,business_id,source_type,source_id,source_key,reference,description,entry_date,total_debit,total_credit,actor_staff_id,branch_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,(SELECT branch_id FROM staff_profiles WHERE id=?11))",
         params![id,business_id,source_type,source_id,source_key,reference,description,date,debit,credit,actor]).map_err(|e|e.to_string())?;
     for (code,dr,cr) in &lines {
         if !dr.is_finite()||!cr.is_finite()||*dr<0.0||*cr<0.0||(*dr>0.0&&*cr>0.0){return Err("Journal lines must contain a non-negative debit or credit, not both.".into());}
@@ -2922,35 +2939,133 @@ fn post_local_journal(c:&Connection,business_id:&str,actor:&str,source_type:&str
     Ok(id)
 }
 #[tauri::command]
-fn get_accounting_workspace(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String)->Result<serde_json::Value,String>{
-    let c=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
-    let (role,_branch,business)=procurement_actor(&c,&actor_staff_id,&["Business Owner","Manager","Accountant"])?;
-    ensure_local_accounting_accounts(&c,&business)?;
-    let mut asmt=c.prepare("SELECT code,name,account_type,account_group,active,is_system FROM accounting_accounts WHERE business_id=?1 ORDER BY code").map_err(|e|e.to_string())?;
-    let accounts=asmt.query_map([&business],|r|Ok(serde_json::json!({"code":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,"group":r.get::<_,String>(3)?,"active":r.get::<_,i64>(4)?==1,"system":r.get::<_,i64>(5)?==1}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let mut jstmt=c.prepare("SELECT id,source_type,source_id,reference,description,entry_date,total_debit,total_credit,created_at FROM journal_entries WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC").map_err(|e|e.to_string())?;
-    let raw=jstmt.query_map([&business],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,f64>(6)?,r.get::<_,f64>(7)?,r.get::<_,String>(8)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let mut journals=Vec::new();
-    for (id,source_type,source_id,reference,description,date,total_debit,total_credit,created_at) in raw{
-        let mut ls=c.prepare("SELECT account_code,account_name,debit,credit FROM journal_lines WHERE journal_id=?1 ORDER BY rowid").map_err(|e|e.to_string())?;
-        let lines=ls.query_map([&id],|r|Ok(serde_json::json!({"accountCode":r.get::<_,String>(0)?,"accountName":r.get::<_,String>(1)?,"debit":r.get::<_,f64>(2)?,"credit":r.get::<_,f64>(3)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-        journals.push(serde_json::json!({"id":id,"sourceType":source_type,"sourceId":source_id,"reference":reference,"description":description,"date":date,"totalDebit":total_debit,"totalCredit":total_credit,"createdAt":created_at,"status":"POSTED","lines":lines}));
+fn get_accounting_workspace(
+    database: tauri::State<'_, LocalDatabase>,
+    actor_staff_id: String,
+    branch_filter_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let c = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+    let (role, assigned_branch, business) =
+        procurement_actor(&c, &actor_staff_id, &["Business Owner", "Manager", "Accountant"])?;
+    if branch_filter_id.is_some() && role != "Business Owner" {
+        return Err("Only the Business Owner can view accounting across or filter between branches.".into());
     }
-    let mut totals:std::collections::HashMap<String,(f64,f64)>=std::collections::HashMap::new();
-    for journal in &journals{for line in journal["lines"].as_array().into_iter().flatten(){let code=line["accountCode"].as_str().unwrap_or_default().to_string();let x=totals.entry(code).or_insert((0.0,0.0));x.0+=line["debit"].as_f64().unwrap_or(0.0);x.1+=line["credit"].as_f64().unwrap_or(0.0);}}
-    let trial:Vec<serde_json::Value>=accounts.iter().map(|a|{
-        let (dr,cr)=totals.get(a["code"].as_str().unwrap_or_default()).copied().unwrap_or((0.0,0.0));
-        serde_json::json!({"code":a["code"],"name":a["name"],"type":a["type"],"group":a["group"],"active":a["active"],"debitTotal":dr,"creditTotal":cr,"debitBalance":(dr-cr).max(0.0),"creditBalance":(cr-dr).max(0.0)})
+    if let Some(branch_id) = branch_filter_id.as_deref() {
+        let valid: i64 = c.query_row(
+            "SELECT COUNT(*) FROM branches WHERE id=?1 AND business_id=?2 AND status='active'",
+            params![branch_id, business], |r| r.get(0)
+        ).map_err(|e| e.to_string())?;
+        if valid == 0 { return Err("The selected branch is not active in this business.".into()); }
+    }
+    ensure_local_accounting_accounts(&c, &business)?;
+    let mut branch_stmt = c.prepare(
+        "SELECT id,name,code FROM branches WHERE business_id=?1 AND status='active' ORDER BY name"
+    ).map_err(|e| e.to_string())?;
+    let branches = branch_stmt.query_map([&business], |r| Ok(serde_json::json!({
+        "id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?,
+        "code": r.get::<_, Option<String>>(2)?
+    }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let mut account_stmt = c.prepare(
+        "SELECT code,name,account_type,account_group,active,is_system FROM accounting_accounts WHERE business_id=?1 ORDER BY code"
+    ).map_err(|e| e.to_string())?;
+    let accounts = account_stmt.query_map([&business], |r| Ok(serde_json::json!({
+        "code":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"type":r.get::<_,String>(2)?,
+        "group":r.get::<_,String>(3)?,"active":r.get::<_,i64>(4)?==1,"system":r.get::<_,i64>(5)?==1
+    }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let mut journal_stmt = c.prepare(
+        "SELECT id,source_type,source_id,reference,description,entry_date,total_debit,total_credit,created_at,branch_id
+         FROM journal_entries WHERE business_id=?1 AND (?2 IS NULL OR branch_id=?2)
+         ORDER BY entry_date DESC,created_at DESC"
+    ).map_err(|e| e.to_string())?;
+    let raw = journal_stmt.query_map(params![business, branch_filter_id.as_deref()], |r| Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+        r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,f64>(6)?,r.get::<_,f64>(7)?,
+        r.get::<_,String>(8)?,r.get::<_,Option<String>>(9)?
+    ))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let mut journals = Vec::new();
+    for (id,source_type,source_id,reference,description,date,total_debit,total_credit,created_at,branch_id) in raw {
+        let mut line_stmt = c.prepare(
+            "SELECT account_code,account_name,debit,credit FROM journal_lines WHERE journal_id=?1 ORDER BY rowid"
+        ).map_err(|e| e.to_string())?;
+        let lines = line_stmt.query_map([&id], |r| Ok(serde_json::json!({
+            "accountCode":r.get::<_,String>(0)?,"accountName":r.get::<_,String>(1)?,
+            "debit":r.get::<_,f64>(2)?,"credit":r.get::<_,f64>(3)?
+        }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        journals.push(serde_json::json!({
+            "id":id,"sourceType":source_type,"sourceId":source_id,"reference":reference,
+            "description":description,"date":date,"totalDebit":total_debit,"totalCredit":total_credit,
+            "createdAt":created_at,"branchId":branch_id,"status":"POSTED","lines":lines
+        }));
+    }
+    let mut totals: std::collections::HashMap<String,(f64,f64)> = std::collections::HashMap::new();
+    for journal in &journals {
+        for line in journal["lines"].as_array().into_iter().flatten() {
+            let code = line["accountCode"].as_str().unwrap_or_default().to_string();
+            let total = totals.entry(code).or_insert((0.0,0.0));
+            total.0 += line["debit"].as_f64().unwrap_or(0.0);
+            total.1 += line["credit"].as_f64().unwrap_or(0.0);
+        }
+    }
+    let trial: Vec<serde_json::Value> = accounts.iter().map(|account| {
+        let (debit,credit) = totals.get(account["code"].as_str().unwrap_or_default()).copied().unwrap_or((0.0,0.0));
+        serde_json::json!({
+            "code":account["code"],"name":account["name"],"type":account["type"],"group":account["group"],
+            "active":account["active"],"debitTotal":debit,"creditTotal":credit,
+            "debitBalance":(debit-credit).max(0.0),"creditBalance":(credit-debit).max(0.0)
+        })
     }).collect();
-    let amount_for=|kind:&str|trial.iter().filter(|a|a["type"]==kind).map(|a|if kind=="ASSET"||kind=="EXPENSE"{a["debitBalance"].as_f64().unwrap_or(0.0)-a["creditBalance"].as_f64().unwrap_or(0.0)}else{a["creditBalance"].as_f64().unwrap_or(0.0)-a["debitBalance"].as_f64().unwrap_or(0.0)}).sum::<f64>();
-    let income=amount_for("INCOME");let expenses=amount_for("EXPENSE");let assets=amount_for("ASSET");let liabilities=amount_for("LIABILITY");let equity=amount_for("EQUITY");
-    let cash_balance=["1000","1010","1020"].iter().map(|code|trial.iter().find(|a|a["code"]==*code).map(|a|a["debitBalance"].as_f64().unwrap_or(0.0)-a["creditBalance"].as_f64().unwrap_or(0.0)).unwrap_or(0.0)).sum::<f64>();
+    let amount_for = |kind: &str| trial.iter().filter(|a| a["type"] == kind).map(|a| {
+        if kind == "ASSET" || kind == "EXPENSE" {
+            a["debitBalance"].as_f64().unwrap_or(0.0)-a["creditBalance"].as_f64().unwrap_or(0.0)
+        } else {
+            a["creditBalance"].as_f64().unwrap_or(0.0)-a["debitBalance"].as_f64().unwrap_or(0.0)
+        }
+    }).sum::<f64>();
+    let income=amount_for("INCOME"); let expenses=amount_for("EXPENSE");
+    let assets=amount_for("ASSET"); let liabilities=amount_for("LIABILITY"); let equity=amount_for("EQUITY");
+    let cash_balance=["1000","1010","1020"].iter().map(|code| {
+        trial.iter().find(|a|a["code"]==*code)
+            .map(|a|a["debitBalance"].as_f64().unwrap_or(0.0)-a["creditBalance"].as_f64().unwrap_or(0.0))
+            .unwrap_or(0.0)
+    }).sum::<f64>();
     let opening=journals.iter().find(|j|j["sourceType"]=="OPENING_BALANCE").cloned();
-    let mut expenses_stmt=c.prepare("SELECT id,description,amount,account_code,payment_method,COALESCE(reference,''),entry_date,COALESCE(notes,''),created_at FROM accounting_expenses WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let expenses_rows=expenses_stmt.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"description":r.get::<_,String>(1)?,"amount":r.get::<_,f64>(2)?,"accountCode":r.get::<_,String>(3)?,"paymentMethod":r.get::<_,String>(4)?,"reference":r.get::<_,String>(5)?,"date":r.get::<_,String>(6)?,"notes":r.get::<_,String>(7)?,"createdAt":r.get::<_,String>(8)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    let mut cash_stmt=c.prepare("SELECT id,direction,description,amount,payment_method,account_code,COALESCE(reference,''),entry_date,created_at FROM accounting_cashbook WHERE business_id=?1 ORDER BY entry_date DESC,created_at DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let cash_rows=cash_stmt.query_map([&business],|r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"direction":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,"amount":r.get::<_,f64>(3)?,"paymentMethod":r.get::<_,String>(4)?,"accountCode":r.get::<_,String>(5)?,"reference":r.get::<_,String>(6)?,"date":r.get::<_,String>(7)?,"createdAt":r.get::<_,String>(8)?}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-    Ok(serde_json::json!({"role":role,"accounts":accounts,"journals":journals,"trialBalance":trial,"profitAndLoss":{"income":income,"expenses":expenses,"netProfit":income-expenses},"balanceSheet":{"assets":assets,"liabilities":liabilities,"equity":equity+income-expenses},"cashbook":{"cashBalance":cash_balance},"openingBalance":opening,"postedJournalCount":journals.len(),"expenses":expenses_rows,"cashbookEntries":cash_rows}))
+
+    let mut expense_stmt = c.prepare(
+        "SELECT e.id,e.description,e.amount,e.account_code,e.payment_method,COALESCE(e.reference,''),e.entry_date,
+                COALESCE(e.notes,''),e.created_at,p.branch_id
+         FROM accounting_expenses e LEFT JOIN staff_profiles p ON p.id=e.actor_staff_id
+         WHERE e.business_id=?1 AND (?2 IS NULL OR p.branch_id=?2)
+         ORDER BY e.entry_date DESC,e.created_at DESC LIMIT 100"
+    ).map_err(|e| e.to_string())?;
+    let expense_rows = expense_stmt.query_map(params![business,branch_filter_id.as_deref()], |r| Ok(serde_json::json!({
+        "id":r.get::<_,String>(0)?,"description":r.get::<_,String>(1)?,"amount":r.get::<_,f64>(2)?,
+        "accountCode":r.get::<_,String>(3)?,"paymentMethod":r.get::<_,String>(4)?,
+        "reference":r.get::<_,String>(5)?,"date":r.get::<_,String>(6)?,"notes":r.get::<_,String>(7)?,
+        "createdAt":r.get::<_,String>(8)?,"branchId":r.get::<_,Option<String>>(9)?
+    }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let mut cash_stmt = c.prepare(
+        "SELECT id,direction,description,amount,payment_method,account_code,COALESCE(reference,''),entry_date,created_at,branch_id
+         FROM accounting_cashbook WHERE business_id=?1 AND (?2 IS NULL OR branch_id=?2)
+         ORDER BY entry_date DESC,created_at DESC LIMIT 100"
+    ).map_err(|e| e.to_string())?;
+    let cash_rows = cash_stmt.query_map(params![business,branch_filter_id.as_deref()], |r| Ok(serde_json::json!({
+        "id":r.get::<_,String>(0)?,"direction":r.get::<_,String>(1)?,"description":r.get::<_,String>(2)?,
+        "amount":r.get::<_,f64>(3)?,"paymentMethod":r.get::<_,String>(4)?,"accountCode":r.get::<_,String>(5)?,
+        "reference":r.get::<_,String>(6)?,"date":r.get::<_,String>(7)?,"createdAt":r.get::<_,String>(8)?,
+        "branchId":r.get::<_,Option<String>>(9)?
+    }))).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "role":role,"assignedBranchId":assigned_branch,"selectedBranchId":branch_filter_id,
+        "branches":branches,"accounts":accounts,"journals":journals,"trialBalance":trial,
+        "profitAndLoss":{"income":income,"expenses":expenses,"netProfit":income-expenses},
+        "balanceSheet":{"assets":assets,"liabilities":liabilities,"equity":equity+income-expenses},
+        "cashbook":{"cashBalance":cash_balance},"openingBalance":opening,
+        "postedJournalCount":journals.len(),"expenses":expense_rows,"cashbookEntries":cash_rows
+    }))
 }
 #[tauri::command]
 fn save_accounting_expense(database:tauri::State<'_,LocalDatabase>,actor_staff_id:String,description:String,amount:f64,account_code:String,payment_method:String,reference:String,notes:String,date:String)->Result<serde_json::Value,String>{
