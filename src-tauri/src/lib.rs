@@ -2509,7 +2509,7 @@ async fn bootstrap_desktop_workspace(database: tauri::State<'_, LocalDatabase>) 
 }
 
 async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: String) -> Result<SyncResult, String> {
-    let (token, owner_device, actor_password_hash, pending_passwords, customers, stock_movements, financial) = {
+    let (token, owner, actor_password_hash, pending_passwords, customers, stock_movements, financial) = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         let token=read_sync_value(&connection,"device_token")?.ok_or_else(||"Pair this computer with the online owner portal first.".to_string())?;
         let actor: Option<(String, String)> = connection.query_row(
@@ -2575,7 +2575,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor
 
     // The owner must first merge staff-originated stock movements from the cloud.
     // Only append-only movements are merged here; other owner-controlled data remains local.
-    if owner_device {
+    if owner {
         let response=client.get(format!("{DESKTOP_API_BASE}/desktop/sync/pull")).bearer_auth(&token).header("x-hrms-staff-id", &actor_staff_id).header("x-hrms-password-hash", &actor_password_hash).send().await
             .map_err(|e|format!("Could not check for staff stock updates: {e}"))?;
         let status=response.status();
@@ -2596,13 +2596,13 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor
         let body:serde_json::Value=response.json().await.map_err(|e|e.to_string())?;
         if status.is_success() {
             pending_applied = true;
-        } else if !(owner_device && status == reqwest::StatusCode::CONFLICT) {
+        } else if !(owner && status == reqwest::StatusCode::CONFLICT) {
             return Err(body["error"].as_str().unwrap_or("The staff password change could not be synchronised.").to_string());
         }
     }
 
     let mut push_snapshot: Option<serde_json::Value> = None;
-    if owner_device {
+    if owner {
         let snapshot = {
             let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
             build_local_snapshot(&connection)?
@@ -2639,7 +2639,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor
         let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         apply_remote_snapshot(&mut connection,&remote)?;
     }
-    if !owner_device && !customers.is_empty() {
+    if !owner && !customers.is_empty() {
         let response=client.post(format!("{DESKTOP_API_BASE}/desktop/sync/customers")).bearer_auth(&token).header("x-hrms-staff-id", &actor_staff_id).header("x-hrms-password-hash", &actor_password_hash)
             .json(&serde_json::json!({"customers":customers})).send().await
             .map_err(|e|format!("Could not synchronise customer records: {e}"))?;
@@ -2655,7 +2655,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor
     let updated_at=body["updatedAt"].as_str().unwrap_or("").to_string();
     let branches=remote["branches"].as_array().map(|x|x.len()).unwrap_or(0);
     let staff=remote["staff"].as_array().map(|x|x.len()).unwrap_or(0);
-    if owner_device {
+    if owner {
         let mut connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
         apply_remote_stock_movements(&mut connection,remote)?;
         apply_remote_financial_records(&mut connection,remote)?;
@@ -2665,7 +2665,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor
     }
     let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     write_sync_value(&connection,"last_sync_at",&updated_at)?;
-    Ok(SyncResult{owner_device,updated_at,branches,staff})
+    Ok(SyncResult{owner,updated_at,branches,staff})
 }
 
 #[tauri::command]
