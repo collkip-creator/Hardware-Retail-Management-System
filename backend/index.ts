@@ -551,7 +551,7 @@ export const handler = router({
         status === 'suspended' ? 'Your business licence has been suspended. Enter a replacement licence key below or contact Collkip.' :
         status === 'revoked' ? 'Your business licence has been revoked. Enter a replacement licence key below or contact Collkip.' :
         'Your business licence is not active. Enter a replacement licence key below or contact Collkip.';
-      return json({ licenceActive, status, message, expiresAt: licence.expiresAt || null });
+      return json({ licenceActive, status, message, id: licence.id, licenceId: licence.id, plan: licence.plan || null, expiresAt: licence.expiresAt || null, deviceLimit: licence.deviceLimit || 1, branchLimit: licence.branchLimit || 1, businessId: licence.businessId || null, businessName: licence.businessName || null });
     },
   ],
   'POST /api/desktop/licences/replace': [
