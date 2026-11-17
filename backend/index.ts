@@ -1,4 +1,4 @@
-import { router, json, error, requireAuth, db } from '@appdeploy/sdk';
+import { router, json, error, requireAuth, requireAdminEmailAllowlist, db } from '@appdeploy/sdk';
 
 function userKey(userId: string) {
   return userId.toLowerCase().replace(/[^a-z0-9_]/g, '_');
@@ -18,6 +18,22 @@ async function listOwned(userId: string, name: string) {
 const desktopPairingTable = 'desktop_pairings_global';
 const desktopTokenTable = 'desktop_device_tokens_global';
 
+const softwareOwnerEmail = 'collkip@gmail.com';
+const desktopLicenceTable = 'desktop_licences_global';
+function isSoftwareOwner(ctx: any) {
+  return String(ctx.user?.email || '').trim().toLowerCase() === softwareOwnerEmail;
+}
+function licenceIsUsable(licence: any) {
+  return Boolean(licence && licence.status === 'active' &&
+    (!licence.startsAt || Date.parse(licence.startsAt) <= Date.now()) &&
+    (!licence.expiresAt || Date.parse(licence.expiresAt) > Date.now()));
+}
+async function getLicenceForBusiness(userId: string) {
+  const licences = await db.list(desktopLicenceTable, { limit: 500 });
+  return licences.items.find((item: any) => item.businessUserId === userId) || null;
+}
+
+
 function randomHex(byteLength: number) {
   const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);
@@ -26,6 +42,27 @@ function randomHex(byteLength: number) {
 async function sha256(value: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('');
+}
+function hexBytes(value: string) {
+  const bytes = new Uint8Array(value.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+async function discountPinHash(pin: string, saltHex: string, iterations = 310000) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: hexBytes(saltHex), iterations, hash: 'SHA-256' }, key, 256);
+  return Array.from(new Uint8Array(bits), value => value.toString(16).padStart(2, '0')).join('');
+}
+function constantTimeEqual(left: string, right: string) {
+  if (left.length !== right.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < left.length; i++) mismatch |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  return mismatch === 0;
+}
+async function getSyncedStaff(userId: string) {
+  const saved = await db.list(table(userId, 'desktop_sync_state'), { limit: 1 });
+  const snapshot = saved.items[0]?.snapshot;
+  return Array.isArray(snapshot?.staff) ? snapshot.staff : [];
 }
 function bearerToken(ctx: any) {
   const headers = ctx.event?.headers || {};
@@ -196,33 +233,373 @@ async function postJournal(userId: string, entry: {
   });
 }
 
-async function deriveDiscountPinHash(pin: string, saltHex: string) {
-  const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(value => parseInt(value, 16)));
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, key, 256);
-  return Array.from(new Uint8Array(bits), value => value.toString(16).padStart(2, '0')).join('');
-}
-async function verifyDiscountManagerPin(userId: string, managerId: string, pin: string) {
-  const team = await listOwned(userId, 'team');
-  const manager = team.find((item: any) => item.id === managerId && item.role === 'Branch Manager' && item.status !== 'inactive');
-  if (!manager?.discountPinSalt || !manager?.discountPinHash) return null;
-  const attempts = await listOwned(userId, 'discount_pin_attempts');
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  const recentFailures = attempts.filter((item: any) => item.managerId === managerId && !item.success && new Date(item.createdAt).getTime() >= cutoff);
-  if (recentFailures.length >= 5) return null;
-  const actual = await deriveDiscountPinHash(pin, manager.discountPinSalt);
-  const success = actual === manager.discountPinHash;
-  await addOwned(userId, 'discount_pin_attempts', { managerId, success, createdAt: new Date().toISOString() });
-  return success ? manager : null;
-}
-
 function cashAccountCode(method: string) {
   if (method === 'CASH') return '1000';
   if (method === 'MPESA') return '1010';
   return '1020';
 }
 
+
+const ADMIN_EMAILS = ['collkip@gmail.com'];
+const MASTER_CATALOGUE_CATEGORIES = [
+  'Cement & masonry', 'Steel & metal', 'Roofing', 'Plumbing', 'Electrical',
+  'Timber & boards', 'Paint & finishes', 'Fasteners & fittings',
+  'Tools & equipment', 'Safety & protective wear', 'Doors & household',
+  'Agriculture & irrigation', 'General supplies',
+];
+
+type MasterCatalogueRow = {
+  category: string;
+  productFamily: string;
+  name: string;
+  specification: string;
+  brand: string;
+  sku: string;
+  barcode: string;
+  stockUnit: string;
+  purchaseUnit: string;
+  conversionFactor: number;
+  description: string;
+};
+
+function validateMasterCatalogueRows(input: unknown) {
+  const errors: Array<{ row: number; message: string }> = [];
+  if (!Array.isArray(input) || input.length < 1 || input.length > 500) {
+    return { rows: [] as MasterCatalogueRow[], errors: [{ row: 0, message: 'Upload between 1 and 500 catalogue rows.' }] };
+  }
+  const rows: MasterCatalogueRow[] = [];
+  const seenSkus = new Set<string>();
+  const seenSpecs = new Set<string>();
+  input.forEach((raw, index) => {
+    const item = (raw || {}) as Record<string, unknown>;
+    const rowNumber = index + 2;
+    const category = textField(item.category, 100);
+    const name = textField(item.name, 160);
+    const sku = textField(item.sku, 60).toUpperCase();
+    const stockUnit = textField(item.stockUnit ?? item.unit, 40);
+    const purchaseUnit = textField(item.purchaseUnit, 40) || stockUnit;
+    const conversionFactor = item.conversionFactor === '' || item.conversionFactor == null ? 1 : Number(item.conversionFactor);
+    const productFamily = textField(item.productFamily, 120);
+    const specification = textField(item.specification, 160);
+    const brand = textField(item.brand, 100);
+    const barcode = textField(item.barcode, 80);
+    const description = textField(item.description, 500);
+    if (!MASTER_CATALOGUE_CATEGORIES.includes(category)) errors.push({ row: rowNumber, message: 'Category is missing or is not one of the 13 supported categories.' });
+    if (!name) errors.push({ row: rowNumber, message: 'Product name is required.' });
+    if (!sku) errors.push({ row: rowNumber, message: 'SKU / item code is required.' });
+    if (!stockUnit) errors.push({ row: rowNumber, message: 'Stock unit is required.' });
+    if (!Number.isFinite(conversionFactor) || conversionFactor <= 0) errors.push({ row: rowNumber, message: 'Conversion factor must be a positive number.' });
+    const skuKey = sku.toLowerCase();
+    const specKey = [category, productFamily, name, specification, brand].map(normalise).join('|');
+    if (sku && seenSkus.has(skuKey)) errors.push({ row: rowNumber, message: 'Duplicate SKU within this upload: ' + sku });
+    if (name && seenSpecs.has(specKey)) errors.push({ row: rowNumber, message: 'Duplicate product specification within this upload.' });
+    if (sku) seenSkus.add(skuKey);
+    if (name) seenSpecs.add(specKey);
+    rows.push({ category, productFamily, name, specification, brand, sku, barcode, stockUnit, purchaseUnit, conversionFactor, description });
+  });
+  return { rows, errors };
+}
+
+function masterItemsTable(version: number) {
+  return 'master_catalogue_v' + String(version);
+}
+
+async function listMasterReleases() {
+  const result = await db.list('master_catalogue_releases', { limit: 100 });
+  return result.items.slice().sort((a: any, b: any) => Number(b.version || 0) - Number(a.version || 0));
+}
+
+async function getCurrentMasterRelease() {
+  const releases = await listMasterReleases();
+  const release = releases.find((item: any) => item.status === 'PUBLISHED');
+  if (!release) return { release: null, items: [] as any[] };
+  const result = await db.list(masterItemsTable(Number(release.version)), { limit: 500 });
+  return { release, items: result.items };
+}
+
+async function publishMasterCatalogue(rows: MasterCatalogueRow[], createdBy: string, sourceVersion?: number) {
+  const releases = await listMasterReleases();
+  const version = releases.reduce((max: number, item: any) => Math.max(max, Number(item.version || 0)), 0) + 1;
+  const now = new Date().toISOString();
+  const releaseRecord = {
+    version,
+    status: 'DRAFT',
+    itemCount: rows.length,
+    createdBy,
+    createdAt: now,
+    sourceVersion: sourceVersion ?? null,
+  };
+  const [releaseId] = await db.add('master_catalogue_releases', [releaseRecord]);
+  if (!releaseId) throw new Error('The catalogue release could not be created.');
+  const records = rows.map((row, index) => ({
+    ...row,
+    releaseId,
+    version,
+    sortOrder: index + 1,
+    createdAt: now,
+  }));
+  const ids = await db.add(masterItemsTable(version), records);
+  if (ids.some(id => !id)) {
+    await db.delete(masterItemsTable(version), ids.filter((id): id is string => Boolean(id)));
+    await db.update('master_catalogue_releases', [{
+      id: releaseId,
+      record: { ...releaseRecord, status: 'FAILED', updatedAt: new Date().toISOString() },
+    }]);
+    throw new Error('The catalogue rows could not all be saved. No release was published.');
+  }
+  const published = { ...releaseRecord, status: 'PUBLISHED', publishedAt: new Date().toISOString() };
+  const [updated] = await db.update('master_catalogue_releases', [{ id: releaseId, record: published }]);
+  if (!updated) throw new Error('Catalogue rows were saved, but the release could not be published. Contact support before retrying.');
+  return { ...published, id: releaseId };
+}
+
+async function ensureInitialMasterCatalogue(createdBy: string) {
+  const releases = await listMasterReleases();
+  if (releases.some((item: any) => item.status === 'PUBLISHED')) return;
+  const rows = starterCatalogue.map((item, index) => ({
+    category: item.category,
+    productFamily: item.category,
+    name: item.name,
+    specification: '',
+    brand: '',
+    sku: 'HD-' + String(index + 1).padStart(4, '0'),
+    barcode: '',
+    stockUnit: item.unit,
+    purchaseUnit: item.unit,
+    conversionFactor: 1,
+    description: '',
+  }));
+  await publishMasterCatalogue(rows, createdBy);
+}
+
 export const handler = router({
+
+  'GET /api/software-owner/summary': [
+    requireAuth(),
+    async ctx => {
+      if (!isSoftwareOwner(ctx)) return error('Access is restricted to the Collkip Software Owner administrator.', 403);
+      const licences = await db.list(desktopLicenceTable, { limit: 500 });
+      const items = licences.items.map((item: any) => ({
+        id: item.id, businessName: item.businessName, contactName: item.contactName,
+        contactEmail: item.contactEmail, contactPhone: item.contactPhone, plan: item.plan,
+        status: item.status, price: item.price, currency: item.currency, startsAt: item.startsAt,
+        expiresAt: item.expiresAt, deviceLimit: item.deviceLimit, branchLimit: item.branchLimit,
+        activatedAt: item.activatedAt, createdAt: item.createdAt,
+      }));
+      return json({ items, total: items.length,
+        active: items.filter((x: any) => licenceIsUsable(x)).length,
+        suspended: items.filter((x: any) => x.status === 'suspended').length });
+    },
+  ],
+  'POST /api/software-owner/licences': [
+    requireAuth(),
+    async ctx => {
+      if (!isSoftwareOwner(ctx)) return error('Access is restricted to the Collkip Software Owner administrator.', 403);
+      const body = (ctx.body || {}) as Record<string, any>;
+      const businessName = textField(body.businessName, 160);
+      const contactName = textField(body.contactName, 120);
+      const contactEmail = textField(body.contactEmail, 160).toLowerCase();
+      const contactPhone = textField(body.contactPhone, 50);
+      const plan = ['monthly', 'annual', 'lifetime'].includes(body.plan) ? body.plan : '';
+      const price = Number(body.price || 0);
+      const deviceLimit = Math.floor(Number(body.deviceLimit || 1));
+      const branchLimit = Math.floor(Number(body.branchLimit || 1));
+      if (!businessName || !contactName || !plan || !Number.isFinite(price) || price < 0 ||
+          deviceLimit < 1 || deviceLimit > 100 || branchLimit < 1 || branchLimit > 100)
+        return error('Enter a business, contact, valid plan, non-negative price, and device/branch limits between 1 and 100.', 400);
+      const now = new Date();
+      const startsAt = body.startsAt ? new Date(String(body.startsAt)).toISOString() : now.toISOString();
+      const expiresAt = body.expiresAt ? new Date(String(body.expiresAt)).toISOString() :
+        plan === 'monthly' ? new Date(now.getTime() + 30 * 86400000).toISOString() :
+        plan === 'annual' ? new Date(now.getTime() + 365 * 86400000).toISOString() : null;
+      if (expiresAt && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.parse(startsAt)))
+        return error('The expiry date must be after the start date.', 400);
+      const key = 'HRMS-' + randomHex(16).toUpperCase().match(/.{1,4}/g)!.join('-');
+      const record = { businessName, contactName, contactEmail, contactPhone, plan, price,
+        currency: textField(body.currency, 8) || 'KES', deviceLimit, branchLimit, startsAt, expiresAt,
+        status: 'issued', keyHash: await sha256(key), businessUserId: null, businessId: null,
+        activatedAt: null, createdAt: now.toISOString(), createdBy: ctx.user!.userId };
+      const [id] = await db.add(desktopLicenceTable, [record]);
+      if (!id) return error('The licence could not be created. Please retry.', 500);
+      return json({ id, licenceKey: key, businessName, plan, status: 'issued', expiresAt, deviceLimit, branchLimit });
+    },
+  ],
+  'PATCH /api/software-owner/licences/:id': [
+    requireAuth(),
+    async ctx => {
+      if (!isSoftwareOwner(ctx)) return error('Access is restricted to the Collkip Software Owner administrator.', 403);
+      const records = await db.list(desktopLicenceTable, { limit: 500 });
+      const current = records.items.find((item: any) => item.id === ctx.params.id);
+      if (!current) return error('Licence not found.', 404);
+      const body = (ctx.body || {}) as Record<string, any>;
+      const status = body.status === undefined ? current.status : body.status;
+      if (!['active', 'suspended', 'revoked', 'issued'].includes(status)) return error('Invalid licence status.', 400);
+      const deviceLimit = body.deviceLimit === undefined ? current.deviceLimit : Math.floor(Number(body.deviceLimit));
+      const branchLimit = body.branchLimit === undefined ? current.branchLimit : Math.floor(Number(body.branchLimit));
+      if (!Number.isFinite(deviceLimit) || deviceLimit < 1 || deviceLimit > 100 || !Number.isFinite(branchLimit) || branchLimit < 1 || branchLimit > 100)
+        return error('Device and branch limits must be between 1 and 100.', 400);
+      let expiresAt = current.expiresAt;
+      if (body.expiresAt !== undefined) {
+        expiresAt = body.expiresAt ? new Date(String(body.expiresAt)).toISOString() : null;
+        if (expiresAt && !Number.isFinite(Date.parse(expiresAt))) return error('Enter a valid expiry date.', 400);
+      }
+      const updated = { ...current, status, deviceLimit, branchLimit, expiresAt, updatedAt: new Date().toISOString() };
+      const [saved] = await db.update(desktopLicenceTable, [{ id: current.id, record: updated }]);
+      if (!saved) return error('Licence changes could not be saved.', 500);
+      return json({ ok: true, licence: { id: updated.id, status, expiresAt, deviceLimit, branchLimit } });
+    },
+  ],
+  'POST /api/desktop/licences/activate': [
+    async ctx => {
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const key = textField(body.licenceKey, 100).toUpperCase();
+      const deviceId = textField(body.deviceId, 100);
+      const deviceName = textField(body.deviceName, 120) || 'Primary Windows computer';
+      if (!key || !deviceId) return error('A licence key and device identity are required.', 400);
+      const all = await db.list(desktopLicenceTable, { limit: 500 });
+      const keyHash = await sha256(key);
+      const licence = all.items.find((item: any) => item.keyHash === keyHash);
+      if (!licence) return error('The licence key is invalid.', 404);
+      if (licence.status !== 'issued') return error('This licence has already been activated or is not available for activation.', 409);
+      if (licence.startsAt && Date.parse(licence.startsAt) > Date.now()) return error('This licence is not active yet.', 403);
+      if (licence.expiresAt && Date.parse(licence.expiresAt) <= Date.now()) return error('This licence has expired. Contact Collkip for renewal.', 403);
+      const userId = 'business_' + randomHex(16);
+      const businessId = textField(body.businessId, 100) || randomHex(16);
+      const now = new Date().toISOString();
+      const [claimed] = await db.tx.update(desktopLicenceTable, [{ id: licence.id,
+        record: { ...licence, status: 'active', businessUserId: userId, businessId, activatedAt: now, primaryDeviceId: deviceId },
+        if: { status: 'issued', keyHash: licence.keyHash } }], { patch: true });
+      if (!claimed) return error('This licence has already been activated. Contact Collkip if you need help.', 409);
+      const token = randomHex(32);
+      const [deviceIdRecord] = await db.add(table(userId, 'desktop_devices'), [{
+        userId, deviceId, deviceName, deviceType: 'Windows desktop', ownerDevice: true,
+        status: 'active', createdAt: now, lastSeenAt: now, licenceId: licence.id }]);
+      const [tokenId] = await db.add(desktopTokenTable, [{
+        tokenHash: await sha256(token), userId, deviceId, ownerDevice: true,
+        status: 'active', createdAt: now, licenceId: licence.id }]);
+      if (!deviceIdRecord || !tokenId) return error('The licence was claimed but the primary device could not be registered. Contact support.', 500);
+      return json({ ok: true, id: licence.id, deviceToken: token, ownerDevice: true, deviceId, businessId,
+        businessName: licence.businessName, plan: licence.plan, expiresAt: licence.expiresAt,
+        deviceLimit: licence.deviceLimit, branchLimit: licence.branchLimit });
+    },
+  ],
+
+  'POST /api/desktop/licences/attach': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Sign in again on the primary Business Owner computer.', 401);
+      if (!device.ownerDevice) return error('Only the primary Business Owner computer can attach the business licence.', 403);
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const key = textField(body.licenceKey, 100).toUpperCase();
+      if (!key) return error('A licence key is required.', 400);
+      const current = await getLicenceForBusiness(device.userId);
+      if (current) return error('This business already has a licence linked to it.', 409);
+      const all = await db.list(desktopLicenceTable, { limit: 500 });
+      const keyHash = await sha256(key);
+      const licence = all.items.find((item: any) => item.keyHash === keyHash);
+      if (!licence) return error('The licence key is invalid.', 404);
+      if (licence.status !== 'issued') return error('This licence has already been activated or is not available for activation.', 409);
+      if (licence.startsAt && Date.parse(licence.startsAt) > Date.now()) return error('This licence is not active yet.', 403);
+      if (licence.expiresAt && Date.parse(licence.expiresAt) <= Date.now()) return error('This licence has expired. Contact Collkip for renewal.', 403);
+      const saved = await db.list(table(device.userId, 'desktop_sync_state'), { limit: 1 });
+      const snapshotBusinessId = saved.items[0]?.snapshot?.business?.id;
+      const businessId = String(snapshotBusinessId || textField(body.businessId, 100) || randomHex(16));
+      const now = new Date().toISOString();
+      const [claimed] = await db.tx.update(desktopLicenceTable, [{
+        id: licence.id,
+        record: { ...licence, status: 'active', businessUserId: device.userId, businessId, activatedAt: now, primaryDeviceId: device.deviceId },
+        if: { status: 'issued', keyHash: licence.keyHash },
+      }], { patch: true });
+      if (!claimed) return error('This licence has already been activated. Contact Collkip if you need help.', 409);
+      const tokenUpdated = await db.update(desktopTokenTable, [{ id: device.id, record: { ...device, licenceId: licence.id, lastSeenAt: now } }]);
+      const deviceRows = await db.list(table(device.userId, 'desktop_devices'), { limit: 100 });
+      const registeredDevice = deviceRows.items.find((item: any) => item.deviceId === device.deviceId);
+      let deviceSaved = false;
+      if (registeredDevice) {
+        const [ok] = await db.update(table(device.userId, 'desktop_devices'), [{
+          id: registeredDevice.id,
+          record: { ...registeredDevice, licenceId: licence.id, status: 'active', lastSeenAt: now },
+        }]);
+        deviceSaved = Boolean(ok);
+      } else {
+        const [id] = await db.add(table(device.userId, 'desktop_devices'), [{
+          userId: device.userId, deviceId: device.deviceId, deviceName: textField(body.deviceName, 120) || 'Primary Windows computer',
+          deviceType: 'Windows desktop', ownerDevice: true, status: 'active', createdAt: now, lastSeenAt: now, licenceId: licence.id,
+        }]);
+        deviceSaved = Boolean(id);
+      }
+      if (!tokenUpdated?.[0] || !deviceSaved) {
+        console.error('Licence attached but existing primary device metadata could not be fully updated', { licenceId: licence.id, deviceId: device.deviceId });
+        return error('The licence was linked, but this computer record could not be fully updated. Contact Collkip before retrying.', 500);
+      }
+      return json({ ok: true, id: licence.id, ownerDevice: true, deviceId: device.deviceId, businessId,
+        businessName: licence.businessName, plan: licence.plan, expiresAt: licence.expiresAt,
+        deviceLimit: licence.deviceLimit, branchLimit: licence.branchLimit });
+    },
+  ],
+  'GET /api/desktop/licences/status': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Sign in again.', 401);
+      const licence = await getLicenceForBusiness(device.userId);
+      if (!licence) return json({ licenceActive: false, status: 'none', message: 'No licence is currently linked to this business.' });
+      const expired = Boolean(licence.expiresAt && Date.parse(licence.expiresAt) <= Date.now());
+      const status = expired && licence.status === 'active' ? 'expired' : licence.status;
+      const licenceActive = licenceIsUsable(licence);
+      const message = licenceActive ? 'Your business licence is active.' :
+        status === 'expired' ? 'Your business licence has expired. Enter a replacement licence key below.' :
+        status === 'suspended' ? 'Your business licence has been suspended. Enter a replacement licence key below or contact Collkip.' :
+        status === 'revoked' ? 'Your business licence has been revoked. Enter a replacement licence key below or contact Collkip.' :
+        'Your business licence is not active. Enter a replacement licence key below or contact Collkip.';
+      return json({ licenceActive, status, message, expiresAt: licence.expiresAt || null });
+    },
+  ],
+  'POST /api/desktop/licences/replace': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Sign in again.', 401);
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const actorStaffId = textField(body.actorStaffId, 100);
+      const passwordHash = textField(body.passwordHash, 300);
+      if (!actorStaffId || !passwordHash.startsWith('$argon2')) {
+        return error('Sign in as the Business Owner before replacing the licence.', 403);
+      }
+      const syncRows = await db.list(table(device.userId, 'desktop_sync_state'), { limit: 1 });
+      const snapshot = syncRows.items.length ? syncRows.items[0].snapshot : null;
+      const staffRows = snapshot && Array.isArray(snapshot.staff) ? snapshot.staff : [];
+      const ownerAccount = staffRows.find((item: any) =>
+        item.profile && item.profile.id === actorStaffId &&
+        item.profile.role === 'Business Owner' &&
+        item.profile.status === 'active' &&
+        item.account && item.account.status === 'active' &&
+        item.account.passwordHash === passwordHash
+      );
+      if (!ownerAccount) return error('The signed-in account could not be verified as this business active Business Owner. Sync and sign in again.', 403);
+      const current = await getLicenceForBusiness(device.userId);
+      if (!current) return error('No existing licence was found for this business. Contact Collkip for assistance.', 404);
+      if (licenceIsUsable(current)) return error('The current licence is still active. A replacement is only needed after suspension, revocation or expiry.', 409);
+      const key = textField(body.licenceKey, 100).toUpperCase();
+      if (!key) return error('Enter the replacement licence key.', 400);
+      const all = await db.list(desktopLicenceTable, { limit: 500 });
+      const keyHash = await sha256(key);
+      const replacement = all.items.find((item: any) => item.keyHash === keyHash);
+      if (!replacement) return error('The replacement licence key is invalid.', 404);
+      if (replacement.id === current.id) return error('Enter a new licence key, not the expired or inactive key.', 400);
+      if (replacement.status !== 'issued' || replacement.businessUserId) return error('This replacement licence has already been used or is not available.', 409);
+      if (replacement.startsAt && Date.parse(replacement.startsAt) > Date.now()) return error('This replacement licence is not active yet.', 403);
+      if (replacement.expiresAt && Date.parse(replacement.expiresAt) <= Date.now()) return error('This replacement licence has already expired.', 403);
+      const now = new Date().toISOString();
+      const businessId = String(current.businessId || snapshot?.business?.id || textField(body.businessId, 100) || '');
+      const oldRecord = { ...current, status: 'replaced', businessUserId: null, businessId: null, replacedAt: now, replacedByLicenceId: replacement.id, updatedAt: now };
+      const newRecord = { ...replacement, status: 'active', businessUserId: device.userId, businessId, activatedAt: now, primaryDeviceId: current.primaryDeviceId || device.deviceId, updatedAt: now };
+      const updated = await db.tx.update(desktopLicenceTable, [
+        { id: current.id, record: oldRecord, if: { status: current.status, keyHash: current.keyHash } },
+        { id: replacement.id, record: newRecord, if: { status: 'issued', keyHash: replacement.keyHash } },
+      ], { patch: true });
+      if (!updated || updated.length !== 2 || !updated.every(Boolean)) return error('The replacement key could not be applied. Refresh and try again.', 409);
+      return json({ ok: true, id: newRecord.id, deviceToken: null, ownerDevice: device.ownerDevice, deviceId: device.deviceId, businessId, businessName: replacement.businessName, plan: replacement.plan, expiresAt: replacement.expiresAt, deviceLimit: replacement.deviceLimit, branchLimit: replacement.branchLimit });
+    },
+  ],
 
   'POST /api/desktop/pairings/issue': [
     async ctx => {
@@ -235,22 +612,18 @@ export const handler = router({
         return error('Sign in as the Business Owner before generating a pairing code.', 403);
       }
       const syncRows = await db.list(table(device.userId, 'desktop_sync_state'), { limit: 1 });
-      const snapshot = syncRows.items[0]?.snapshot;
-      const staffRows = Array.isArray(snapshot?.staff) ? snapshot.staff : [];
+      const staffRows = Array.isArray(syncRows.items[0]?.snapshot?.staff) ? syncRows.items[0].snapshot.staff : [];
       const ownerAccount = staffRows.find((item: any) =>
-        item.profile?.id === actorStaffId &&
-        item.profile?.role === 'Business Owner' &&
-        item.profile?.status === 'active' &&
-        item.account?.status === 'active' &&
-        item.account?.mustChangePassword !== true &&
-        item.account?.passwordHash === passwordHash
+        item.profile?.id === actorStaffId && item.profile?.role === 'Business Owner' &&
+        item.profile?.status === 'active' && item.account?.status === 'active' &&
+        item.account?.mustChangePassword !== true && item.account?.passwordHash === passwordHash
       );
       if (!ownerAccount) return error('The signed-in account could not be verified as this business active Business Owner. Sync and sign in again.', 403);
       const licence = await getLicenceForBusiness(device.userId);
       if (!licenceIsUsable(licence)) return error('The business licence is not active. Refresh licence status before generating pairing codes.', 403);
       const devices = await db.list(table(device.userId, 'desktop_devices'), { limit: 100 });
       const activeDevices = devices.items.filter((item: any) => item.status === 'active');
-      if (activeDevices.length >= 100) return error('The current device allowance has been reached. Contact the software provider to review your licence.', 403);
+      if (activeDevices.length >= Number(licence.deviceLimit || 1)) return error('The device allowance for this business licence has been reached.', 403);
       const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 90000000 + 10000000);
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
       const record = {
@@ -271,10 +644,10 @@ export const handler = router({
   'POST /api/desktop/pairings/claim': [
     async ctx => {
       const body = (ctx.body || {}) as Record<string, unknown>;
-      const code = textField(body.code, 16).replace(/\\s/g, '');
+      const code = textField(body.code, 16).replace(/\s/g, '');
       const deviceId = textField(body.deviceId, 80);
       const deviceName = textField(body.deviceName, 100) || 'Windows desktop';
-      if (!/^\\d{8}$/.test(code) || !deviceId) return error('Enter a valid 8-digit pairing code and device identity.', 400);
+      if (!/^\d{8}$/.test(code) || !deviceId) return error('Enter a valid 8-digit pairing code and device identity.', 400);
       const sourceIp = textField(ctx.event?.requestContext?.http?.sourceIp || ctx.event?.requestContext?.identity?.sourceIp || 'unknown', 80);
       const ipHash = await sha256(sourceIp);
       const attemptsTable = 'desktop_pairing_attempts_global';
@@ -302,7 +675,12 @@ export const handler = router({
       const pairing = pairings.items.find((item: any) => item.codeHash === codeHash && item.status === 'pending');
       if (!pairing) return error('This pairing code is invalid or has already been used.', 404);
       if (Date.parse(pairing.expiresAt) <= Date.now()) return error('This pairing code has expired. Generate a new one from the owner portal.', 410);
+      const licence = await getLicenceForBusiness(pairing.userId);
+      if (!licenceIsUsable(licence)) return error('The business licence is not active. Contact Collkip before pairing another computer.', 403);
       const devices = await db.list(table(pairing.userId, 'desktop_devices'), { limit: 100 });
+      if (devices.items.filter((item: any) => item.status === 'active').length >= Number(licence.deviceLimit || 1)) {
+        return error('The device allowance for this business licence has been reached.', 403);
+      }
       if (devices.items.some((item: any) => item.deviceId === deviceId && item.status === 'active')) {
         return error('This computer is already registered. Use its existing installation or revoke its previous registration.', 409);
       }
@@ -319,7 +697,8 @@ export const handler = router({
         deviceId,
         deviceName,
         deviceType: 'Windows desktop',
-        ownerDevice: Boolean(pairing.ownerDevice),
+        ownerDevice: false,
+        licenceId: licence.id,
         status: 'active',
         createdAt: new Date().toISOString(),
         lastSeenAt: new Date().toISOString(),
@@ -330,12 +709,16 @@ export const handler = router({
         tokenHash,
         userId: pairing.userId,
         deviceId,
-        ownerDevice: device.ownerDevice,
+        ownerDevice: false,
+        licenceId: licence.id,
         status: 'active',
         createdAt: new Date().toISOString(),
       }]);
       if (!tokenId) return error('A secure device credential could not be issued.', 500);
-      return json({ deviceToken: token, ownerDevice: device.ownerDevice, deviceId });
+      return json({ deviceToken: token, ownerDevice: false, deviceId, licenceId: licence.id,
+        licenceStatus: licence.status, plan: licence.plan, expiresAt: licence.expiresAt || null,
+        deviceLimit: licence.deviceLimit, branchLimit: licence.branchLimit,
+        businessId: licence.businessId || null, businessName: licence.businessName || null });
     },
   ],
   'GET /api/desktop/sync/pull': [
@@ -361,8 +744,10 @@ export const handler = router({
       if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
       const body = (ctx.body || {}) as Record<string, any>;
       const staffId = textField(body.staffId, 80);
+      const actorStaffId = textField(ctx.event?.headers?.['x-hrms-staff-id'] || ctx.event?.headers?.['X-Hrms-Staff-Id'], 100);
       const expectedHash = typeof body.expectedPasswordHash === 'string' ? body.expectedPasswordHash : '';
       const nextHash = typeof body.passwordHash === 'string' ? body.passwordHash : '';
+      if (!actorStaffId || actorStaffId !== staffId) return error('A staff member may only synchronise their own password change.', 403);
       if (!staffId || !expectedHash.startsWith('$argon2') || !nextHash.startsWith('$argon2')) {
         return error('A staff ID and Argon2 password hashes are required. Plaintext passwords are never accepted.', 400);
       }
@@ -388,6 +773,8 @@ export const handler = router({
     async ctx => {
       const device = await authenticatedDesktop(ctx);
       if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      const actor = await verifiedDesktopActor(ctx, device);
+      if (!actor) return error('The signed-in staff account could not be verified. Sign in again and synchronise.', 403);
       const body = (ctx.body || {}) as Record<string, any>;
       const incoming = Array.isArray(body.customers) ? body.customers : null;
       if (!incoming || incoming.length > 5000) return error('A valid customer list of up to 5,000 records is required.', 400);
@@ -484,6 +871,313 @@ export const handler = router({
       return json({ ok: true, updatedAt, revision: saved.revision, received: incoming.length, added: additions.length });
     },
   ],
+  'POST /api/desktop/sync/transactions': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This computer is not authorised. Pair it again from the owner portal.', 401);
+      const actor = await verifiedDesktopActor(ctx, device);
+      if (!actor) return error('The signed-in staff account could not be verified. Sign in again and synchronise.', 403);
+      if (actor.profile.role === 'Business Owner') return error('The Business Owner account uses full business snapshot synchronisation.', 403);
+
+      const body = (ctx.body || {}) as Record<string, any>;
+      const financial = body.financial;
+      if (!financial || typeof financial !== 'object' || Array.isArray(financial)) {
+        return error('A financial transaction batch is required.', 400);
+      }
+      if (new TextEncoder().encode(JSON.stringify(body)).length > 5000000) {
+        return error('The POS transaction batch exceeds the 5 MB limit.', 413);
+      }
+
+      const tableColumns: Record<string, string[]> = {
+        pos_shifts: ['id', 'branch_id', 'cashier_staff_id', 'opening_float', 'closing_cash', 'closing_mpesa', 'status', 'opened_at', 'closed_at'],
+        sales: ['id', 'receipt_number', 'branch_id', 'shift_id', 'cashier_staff_id', 'total', 'payment_method', 'payment_reference', 'status', 'created_at', 'customer_id', 'customer_name', 'customer_phone', 'cash_amount', 'mpesa_amount', 'subtotal', 'discount_amount', 'discount_type', 'discount_value', 'discount_approved_by', 'discount_approved_at'],
+        sale_items: ['id', 'sale_id', 'product_id', 'product_name', 'quantity', 'unit_price', 'unit_cost', 'line_total', 'discount_amount', 'net_line_total'],
+        sale_returns: ['id', 'return_number', 'sale_id', 'branch_id', 'shift_id', 'actor_staff_id', 'approved_by', 'reason', 'refund_total', 'cash_amount', 'mpesa_amount', 'mpesa_reference', 'status', 'created_at'],
+        sale_return_items: ['id', 'return_id', 'sale_item_id', 'product_id', 'product_name', 'quantity', 'unit_refund', 'refund_amount', 'restock_quantity'],
+        cashbook_entries: ['id', 'business_id', 'entry_type', 'direction', 'amount', 'payment_method', 'reference', 'description', 'source_type', 'source_id', 'actor_staff_id', 'created_at'],
+        accounting_cashbook: ['id', 'business_id', 'direction', 'description', 'amount', 'payment_method', 'account_code', 'reference', 'entry_date', 'actor_staff_id', 'branch_id', 'created_at'],
+        journal_entries: ['id', 'business_id', 'source_type', 'source_id', 'source_key', 'reference', 'description', 'entry_date', 'status', 'total_debit', 'total_credit', 'actor_staff_id', 'branch_id', 'created_at'],
+        journal_lines: ['id', 'journal_id', 'account_code', 'account_name', 'debit', 'credit']
+      };
+      const tableOrder = Object.keys(tableColumns);
+      for (const name of Object.keys(financial)) {
+        if (!tableColumns[name]) return error('The transaction batch contains an unsupported table.', 400);
+      }
+      for (const name of tableOrder) {
+        if (financial[name] !== undefined && (!Array.isArray(financial[name]) || financial[name].length > 10000)) {
+          return error('The ' + name + ' batch must be an array of up to 10,000 records.', 400);
+        }
+      }
+
+      const targetTable = table(device.userId, 'desktop_sync_state');
+      const saved = await db.list(targetTable, { limit: 1 });
+      const current = saved.items[0];
+      if (!current?.snapshot?.business?.id || !Array.isArray(current.snapshot.branches) ||
+          !Array.isArray(current.snapshot.staff) || !current.snapshot.inventory?.products) {
+        return error('The owner computer must publish the business, staff, branches and product catalogue before POS transactions can sync.', 409);
+      }
+
+      const snapshot = JSON.parse(JSON.stringify(current.snapshot));
+      const businessId = snapshot.business.id;
+      const branchIds = new Set(snapshot.branches.map((item: any) => item.id));
+      const productIds = new Set((snapshot.inventory.products || []).map((item: any) => item.id));
+      const staffById = new Map((snapshot.staff || []).map((item: any) => [item.profile?.id, item.profile]));
+      const activeStaff = (id: any) => {
+        const profile: any = staffById.get(id);
+        return profile && profile.status === 'active' ? profile : null;
+      };
+      const branchAllowed = (profile: any, branchId: string) =>
+        Boolean(profile && branchIds.has(branchId) && (!profile.branchId || profile.branchId === branchId));
+      const finite = (value: any) => typeof value === 'number' && Number.isFinite(value);
+      const positive = (value: any) => finite(value) && value > 0;
+      const nonNegative = (value: any) => finite(value) && value >= 0;
+      const cleanText = (value: any, max = 240) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+      const existingFinancial = snapshot.financial && typeof snapshot.financial === 'object' ? snapshot.financial : {};
+      const merged: Record<string, any[]> = {};
+      for (const name of tableOrder) merged[name] = Array.isArray(existingFinancial[name]) ? existingFinancial[name].slice() : [];
+
+      const batch: Record<string, any[]> = {};
+      for (const name of tableOrder) {
+        const rows = Array.isArray(financial[name]) ? financial[name] : [];
+        const seen = new Set<string>();
+        batch[name] = [];
+        for (const row of rows) {
+          if (!row || typeof row !== 'object' || Array.isArray(row)) return error('A ' + name + ' record is invalid.', 400);
+          const keys = Object.keys(row);
+          if (keys.some((key: string) => !tableColumns[name].includes(key))) return error('A ' + name + ' record contains unsupported fields.', 400);
+          if (!cleanText(row.id, 120) || seen.has(row.id)) return error('Every ' + name + ' record must have a unique ID in this batch.', 400);
+          seen.add(row.id);
+          batch[name].push(row);
+        }
+      }
+
+      const currentById: Record<string, Map<string, any>> = {};
+      for (const name of tableOrder) currentById[name] = new Map(merged[name].map((row: any) => [row.id, row]));
+      const shifts = new Map(currentById.pos_shifts);
+      for (const row of batch.pos_shifts) {
+        const cashier = activeStaff(row.cashier_staff_id);
+        if (!branchAllowed(cashier, row.branch_id) || !cleanText(row.opened_at, 80) ||
+            !nonNegative(row.opening_float) || !['OPEN', 'CLOSED'].includes(row.status)) {
+          return error('A shift references an invalid branch, cashier, opening float or status.', 400);
+        }
+        if (row.status === 'CLOSED' && (!nonNegative(row.closing_cash) || !nonNegative(row.closing_mpesa) || !cleanText(row.closed_at, 80))) {
+          return error('A closed shift must include valid closing cash, M-Pesa and closing time.', 400);
+        }
+        const prior: any = shifts.get(row.id);
+        if (prior && (prior.branch_id !== row.branch_id || prior.cashier_staff_id !== row.cashier_staff_id)) {
+          return error('A shift ID cannot be reassigned to another cashier or branch.', 409);
+        }
+        if (prior?.status === 'CLOSED' && row.status !== 'CLOSED') return error('A closed shift cannot be reopened through synchronisation.', 409);
+        if (!prior) shifts.set(row.id, row);
+        else if (row.status === 'CLOSED') shifts.set(row.id, { ...prior, status: 'CLOSED', closing_cash: row.closing_cash, closing_mpesa: row.closing_mpesa, closed_at: row.closed_at });
+      }
+
+      const sales = new Map(currentById.sales);
+      const receiptNumbers = new Set(merged.sales.map((row: any) => row.receipt_number));
+      for (const row of batch.sales) {
+        const cashier = activeStaff(row.cashier_staff_id);
+        const shift: any = shifts.get(row.shift_id);
+        if (!cleanText(row.receipt_number, 80) || !branchAllowed(cashier, row.branch_id) ||
+            !shift || shift.branch_id !== row.branch_id || shift.cashier_staff_id !== row.cashier_staff_id ||
+            !positive(row.total) || !['CASH', 'MPESA', 'SPLIT'].includes(row.payment_method) ||
+            !nonNegative(row.cash_amount) || !nonNegative(row.mpesa_amount) ||
+            Math.abs(row.cash_amount + row.mpesa_amount - row.total) > 0.02 ||
+            !['COMPLETED', 'PARTIALLY_RETURNED', 'RETURNED'].includes(row.status)) {
+          return error('A sale has invalid cashier, shift, branch, payment or total relationships.', 400);
+        }
+        if (row.customer_id && !(snapshot.customers || []).some((item: any) => item.id === row.customer_id)) {
+          return error('A sale references a customer outside this business.', 403);
+        }
+        if (Number(row.discount_amount || 0) > 0) {
+          const approver = activeStaff(row.discount_approved_by);
+          if (!approver || !['Business Owner', 'Manager'].includes(approver.role) ||
+              (approver.role !== 'Business Owner' && approver.branchId && approver.branchId !== row.branch_id)) {
+            return error('A discounted sale must reference an authorised Business Owner or Manager.', 403);
+          }
+        }
+        const prior: any = sales.get(row.id);
+        if (prior && prior.receipt_number !== row.receipt_number) return error('A sale ID cannot be reassigned to another receipt.', 409);
+        if (!prior && receiptNumbers.has(row.receipt_number)) return error('A receipt number is already recorded under another sale ID.', 409);
+        if (!prior) {
+          sales.set(row.id, row);
+          receiptNumbers.add(row.receipt_number);
+        } else if (row.status === 'RETURNED' || (row.status === 'PARTIALLY_RETURNED' && prior.status === 'COMPLETED')) {
+          sales.set(row.id, { ...prior, status: row.status });
+        }
+      }
+
+      const saleItems = new Map(currentById.sale_items);
+      const saleItemIds = new Set(saleItems.keys());
+      for (const row of batch.sale_items) {
+        const sale: any = sales.get(row.sale_id);
+        if (!sale || !productIds.has(row.product_id) || !cleanText(row.product_name, 160) ||
+            !positive(row.quantity) || !nonNegative(row.unit_price) || !nonNegative(row.unit_cost) ||
+            !nonNegative(row.line_total) || !nonNegative(row.discount_amount || 0) || !nonNegative(row.net_line_total ?? row.line_total)) {
+          return error('A sale item references an invalid sale or product, or contains invalid quantities or amounts.', 400);
+        }
+        const prior = saleItems.get(row.id);
+        if (prior && (prior.sale_id !== row.sale_id || prior.product_id !== row.product_id)) return error('A sale item ID cannot be reassigned.', 409);
+        if (!prior) { saleItems.set(row.id, row); saleItemIds.add(row.id); }
+      }
+
+      const returns = new Map(currentById.sale_returns);
+      const returnNumbers = new Set(merged.sale_returns.map((row: any) => row.return_number));
+      for (const row of batch.sale_returns) {
+        const sale: any = sales.get(row.sale_id);
+        const actor = activeStaff(row.actor_staff_id);
+        const approver = activeStaff(row.approved_by);
+        const shift: any = shifts.get(row.shift_id);
+        if (!sale || sale.branch_id !== row.branch_id || !branchAllowed(actor, row.branch_id) ||
+            !approver || !['Business Owner', 'Manager'].includes(approver.role) ||
+            (approver.role !== 'Business Owner' && approver.branchId && approver.branchId !== row.branch_id) ||
+            !shift || shift.branch_id !== row.branch_id || !cleanText(row.return_number, 80) ||
+            !cleanText(row.reason, 500) || !positive(row.refund_total) ||
+            !nonNegative(row.cash_amount) || !nonNegative(row.mpesa_amount) ||
+            Math.abs(row.cash_amount + row.mpesa_amount - row.refund_total) > 0.02 ||
+            !['COMPLETED'].includes(row.status)) {
+          return error('A return has invalid sale, branch, staff approval, shift or refund relationships.', 400);
+        }
+        const prior: any = returns.get(row.id);
+        if (prior && prior.return_number !== row.return_number) return error('A return ID cannot be reassigned to another return number.', 409);
+        if (!prior && returnNumbers.has(row.return_number)) return error('A return number is already recorded under another return ID.', 409);
+        if (!prior) { returns.set(row.id, row); returnNumbers.add(row.return_number); }
+      }
+
+      const returnItems = new Map(currentById.sale_return_items);
+      for (const row of batch.sale_return_items) {
+        const parent: any = returns.get(row.return_id);
+        const sold: any = saleItems.get(row.sale_item_id);
+        if (!parent || !sold || sold.sale_id !== parent.sale_id || sold.product_id !== row.product_id ||
+            !productIds.has(row.product_id) || !cleanText(row.product_name, 160) ||
+            !positive(row.quantity) || !nonNegative(row.unit_refund) || !nonNegative(row.refund_amount) ||
+            !nonNegative(row.restock_quantity) || row.restock_quantity > row.quantity + 0.000001) {
+          return error('A return item does not match its original sale item or contains invalid quantities or amounts.', 400);
+        }
+        const prior = returnItems.get(row.id);
+        if (prior && (prior.return_id !== row.return_id || prior.sale_item_id !== row.sale_item_id)) return error('A return item ID cannot be reassigned.', 409);
+        if (!prior) returnItems.set(row.id, row);
+      }
+
+      const cashbook = new Map(currentById.cashbook_entries);
+      for (const row of batch.cashbook_entries) {
+        const source = row.source_type === 'POS_SALE' ? sales.get(row.source_id) : row.source_type === 'POS_RETURN' ? returns.get(row.source_id) : null;
+        const actor = activeStaff(row.actor_staff_id);
+        if (row.business_id !== businessId || !source || !actor || !['POS_SALE', 'POS_RETURN'].includes(row.entry_type) ||
+            !['POS_SALE', 'POS_RETURN'].includes(row.source_type) ||
+            !['IN', 'OUT'].includes(row.direction) || !positive(row.amount) ||
+            !['CASH', 'MPESA'].includes(row.payment_method) ||
+            (row.source_type === 'POS_SALE' && (row.entry_type !== 'POS_SALE' || row.direction !== 'IN')) ||
+            (row.source_type === 'POS_RETURN' && (row.entry_type !== 'POS_RETURN' || row.direction !== 'OUT'))) {
+          return error('A cashbook entry must be a valid POS sale or refund linked to this business.', 400);
+        }
+        const prior = cashbook.get(row.id);
+        if (!prior) cashbook.set(row.id, row);
+        else if (prior.source_id !== row.source_id || prior.source_type !== row.source_type) return error('A cashbook entry ID cannot be reassigned.', 409);
+      }
+
+      const manualCashbook = new Map(currentById.accounting_cashbook);
+      for (const row of batch.accounting_cashbook) {
+        const actor = activeStaff(row.actor_staff_id);
+        const cashCode = row.payment_method === 'CASH' ? '1000' : row.payment_method === 'MPESA' ? '1010' : row.payment_method === 'BANK' ? '1020' : '';
+        if (row.business_id !== businessId || !actor || !['Manager', 'Accountant'].includes(actor.role) || actor.branchId !== row.branch_id ||
+            !branchAllowed(actor, row.branch_id) || !cleanText(row.branch_id, 120) ||
+            !['RECEIPT', 'PAYMENT'].includes(row.direction) || !cleanText(row.description, 180) ||
+            !positive(row.amount) || !cashCode || !cleanText(row.account_code, 40) || row.account_code === cashCode ||
+            !cleanText(row.entry_date, 40) || !cleanText(row.actor_staff_id, 120)) {
+          return error('A manual cashbook entry must have a valid active staff member, assigned branch, account, date and positive amount.', 400);
+        }
+        const prior = manualCashbook.get(row.id);
+        if (prior && (prior.branch_id !== row.branch_id || prior.actor_staff_id !== row.actor_staff_id)) {
+          return error('A cashbook entry cannot be reassigned to another branch or staff member.', 409);
+        }
+        if (!prior) manualCashbook.set(row.id, row);
+      }
+
+      const journals = new Map(currentById.journal_entries);
+      for (const row of batch.journal_entries) {
+        const source = row.source_type === 'SALE' ? sales.get(row.source_id) :
+          row.source_type === 'RETURN' ? returns.get(row.source_id) :
+          row.source_type === 'CASHBOOK' ? manualCashbook.get(row.source_id) : null;
+        const actor = activeStaff(row.actor_staff_id);
+        const isCashbook = row.source_type === 'CASHBOOK';
+        const effectiveBranchId = isCashbook ? row.branch_id : source?.branch_id;
+        const branchMatches = source && (isCashbook ? source.branch_id === row.branch_id : (!row.branch_id || row.branch_id === source.branch_id));
+        if (row.business_id !== businessId || !source || !actor || !branchMatches ||
+            !['SALE', 'RETURN', 'CASHBOOK'].includes(row.source_type) || !cleanText(effectiveBranchId, 120) ||
+            !cleanText(row.source_key, 160) || (isCashbook && row.source_key !== 'CASHBOOK:' + row.source_id) ||
+            !cleanText(row.reference, 120) || !cleanText(row.description, 500) ||
+            !cleanText(row.entry_date, 40) || !positive(row.total_debit) ||
+            !positive(row.total_credit) || Math.abs(row.total_debit - row.total_credit) > 0.02 ||
+            row.status !== 'POSTED') {
+          return error('A journal entry must be a balanced posted POS or authorised branch cashbook journal for this business.', 400);
+        }
+        if (!branchAllowed(actor, effectiveBranchId) || (isCashbook && (!['Manager', 'Accountant'].includes(actor.role) || actor.branchId !== effectiveBranchId))) {
+          return error('The journal actor is not authorised for this branch.', 403);
+        }
+        const prior = journals.get(row.id);
+        if (prior && (prior.source_key !== row.source_key || (prior.branch_id && prior.branch_id !== effectiveBranchId))) return error('A journal entry ID cannot be reassigned.', 409);
+        if (!prior && merged.journal_entries.some((item: any) => item.source_key === row.source_key)) {
+          return error('This journal source has already been posted.', 409);
+        }
+        if (!prior) journals.set(row.id, { ...row, branch_id: effectiveBranchId });
+      }
+
+      const journalLines = new Map(currentById.journal_lines);
+      for (const row of batch.journal_lines) {
+        const journal: any = journals.get(row.journal_id);
+        if (!journal || !cleanText(row.account_code, 40) || !cleanText(row.account_name, 160) ||
+            !nonNegative(row.debit) || !nonNegative(row.credit) ||
+            (row.debit > 0 && row.credit > 0) || (row.debit === 0 && row.credit === 0)) {
+          return error('A journal line must belong to an authorised POS or cashbook journal and contain a valid debit or credit.', 400);
+        }
+        const prior = journalLines.get(row.id);
+        if (prior && prior.journal_id !== row.journal_id) return error('A journal line ID cannot be reassigned.', 409);
+        if (!prior) journalLines.set(row.id, row);
+      }
+      for (const row of batch.journal_entries.filter((item: any) => item.source_type === 'CASHBOOK')) {
+        const linked = manualCashbook.get(row.source_id);
+        const lines = Array.from(journalLines.values()).filter((line: any) => line.journal_id === row.id);
+        const cashCode = linked?.payment_method === 'CASH' ? '1000' : linked?.payment_method === 'MPESA' ? '1010' : '1020';
+        const expectedDebitCode = linked?.direction === 'RECEIPT' ? cashCode : linked?.account_code;
+        const expectedCreditCode = linked?.direction === 'RECEIPT' ? linked?.account_code : cashCode;
+        const debit = Math.round(lines.reduce((sum: number, line: any) => sum + Number(line.debit || 0), 0) * 100) / 100;
+        const credit = Math.round(lines.reduce((sum: number, line: any) => sum + Number(line.credit || 0), 0) * 100) / 100;
+        const debitLine = lines.find((line: any) => Number(line.debit || 0) > 0);
+        const creditLine = lines.find((line: any) => Number(line.credit || 0) > 0);
+        if (!linked || lines.length !== 2 || Math.abs(debit - Number(linked.amount)) > 0.02 ||
+            Math.abs(credit - Number(linked.amount)) > 0.02 || Math.abs(debit - credit) > 0.02 ||
+            debitLine?.account_code !== expectedDebitCode || creditLine?.account_code !== expectedCreditCode) {
+          return error('A manual cashbook journal must contain the two authorised accounts and balanced lines matching its cashbook amount.', 400);
+        }
+      }
+
+      for (const name of tableOrder) {
+        const byId = new Map(merged[name].map((row: any) => [row.id, row]));
+        for (const row of batch[name]) {
+          const prior: any = byId.get(row.id);
+          if (!prior) byId.set(row.id, row);
+          else if (name === 'pos_shifts' && row.status === 'CLOSED') {
+            byId.set(row.id, { ...prior, status: 'CLOSED', closing_cash: row.closing_cash, closing_mpesa: row.closing_mpesa, closed_at: row.closed_at });
+          } else if (name === 'sales' && (row.status === 'RETURNED' || (row.status === 'PARTIALLY_RETURNED' && prior.status === 'COMPLETED'))) {
+            byId.set(row.id, { ...prior, status: row.status });
+          }
+        }
+        merged[name] = Array.from(byId.values());
+      }
+
+      snapshot.financial = merged;
+      const updatedAt = new Date().toISOString();
+      const record = { ...current, snapshot, updatedAt, updatedByDeviceId: device.deviceId, revision: Number(current.revision || 0) + 1 };
+      const [ok] = await db.update(targetTable, [{ id: current.id, record }]);
+      if (!ok) return error('POS transaction records could not be saved to the cloud. Please retry.', 500);
+      return json({
+        ok: true, updatedAt, revision: record.revision,
+        received: tableOrder.reduce((sum, name) => sum + batch[name].length, 0),
+        added: tableOrder.reduce((sum, name) => sum + batch[name].filter((row: any) => !currentById[name].has(row.id)).length, 0)
+      });
+    },
+  ],
+
   'POST /api/desktop/sync/push': [
     async ctx => {
       const device = await authenticatedDesktop(ctx);
@@ -504,16 +1198,6 @@ export const handler = router({
       const targetTable = table(device.userId, 'desktop_sync_state');
       const existing = await db.list(targetTable, { limit: 1 });
       const latestSnapshot = existing.items[0]?.snapshot;
-      if (latestSnapshot && Array.isArray(latestSnapshot.customers)) {
-        const merged = new Map<string, any>((Array.isArray(snapshot.customers) ? snapshot.customers : []).map((item: any): [string, any] => [item.id, item]));
-        for (const latest of latestSnapshot.customers) {
-          const incoming: any = merged.get(latest.id);
-          const latestTime = Date.parse(latest.updatedAt || latest.createdAt || '') || 0;
-          const incomingTime = Date.parse(incoming?.updatedAt || incoming?.createdAt || '') || 0;
-          if (!incoming || latestTime > incomingTime) merged.set(latest.id, latest);
-        }
-        snapshot.customers = Array.from(merged.values());
-      }
       if (latestSnapshot && Array.isArray(latestSnapshot.staff)) {
         for (const staff of snapshot.staff) {
           const latest = latestSnapshot.staff.find((item: any) => item.profile?.id === staff.profile?.id);
@@ -537,6 +1221,54 @@ export const handler = router({
         if (!id) return error('The first cloud snapshot could not be saved. Please retry.', 500);
       }
       return json({ ok: true, revision: saved.revision, updatedAt: saved.updatedAt, snapshot: saved.snapshot });
+    },
+  ],
+
+  'GET /api/discount-managers': [
+    requireAuth(),
+    async ctx => {
+      const userId = ctx.user!.userId;
+      const staff = await getSyncedStaff(userId);
+      if (!staff.length) return error('No synced desktop staff accounts were found. Sync the authorised Windows computer first.', 409);
+      const configured = await listOwned(userId, 'discount_manager_credentials');
+      const items = staff.filter((item: any) => ['Manager', 'Business Owner'].includes(item.profile?.role) &&
+        item.profile?.status !== 'inactive' && item.account?.status !== 'inactive' && item.account?.mustChangePassword !== true)
+        .map((item: any) => {
+          const saved = configured.find((entry: any) => entry.managerStaffId === item.profile.id && entry.active !== false);
+          return { id: item.profile.id, name: item.profile.displayName || item.account.username, role: item.profile.role,
+            configured: Boolean(saved), discountLimitPercent: saved ? Number(saved.discountLimitPercent) : 0 };
+        });
+      return json({ items });
+    },
+  ],
+  'PUT /api/discount-managers/:id': [
+    requireAuth(),
+    async ctx => {
+      const userId = ctx.user!.userId;
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const pin = textField(body.pin, 64);
+      const limit = Number(body.discountLimitPercent);
+      if (pin.length < 8) return error('Manager approval PIN must contain at least 8 characters.', 400);
+      if (!Number.isFinite(limit) || limit < 0 || limit > 100) return error('Set a discount limit between 0 and 100 percent.', 400);
+      const staff = await getSyncedStaff(userId);
+      const manager = staff.find((item: any) => item.profile?.id === ctx.params.id &&
+        ['Manager', 'Business Owner'].includes(item.profile?.role) && item.profile?.status !== 'inactive' &&
+        item.account?.status !== 'inactive' && item.account?.mustChangePassword !== true);
+      if (!manager) return error('The selected manager is not an active, fully activated synced staff account.', 404);
+      const records = await listOwned(userId, 'discount_manager_credentials');
+      const current = records.find((item: any) => item.managerStaffId === ctx.params.id);
+      const salt = randomHex(16), iterations = 310000;
+      const pinHash = await discountPinHash(pin, salt, iterations);
+      const now = new Date().toISOString();
+      const record = { managerStaffId: ctx.params.id, managerName: textField(manager.profile.displayName || manager.account.username, 120),
+        role: manager.profile.role, discountLimitPercent: Math.round(limit * 100) / 100, salt, pinHash, iterations, active: true, updatedAt: now };
+      if (current) {
+        const [ok] = await db.update(table(userId, 'discount_manager_credentials'), [{ id: current.id, record: { ...current, ...record } }]);
+        if (!ok) return error('Manager discount settings could not be saved.', 500);
+      } else await addOwned(userId, 'discount_manager_credentials', record);
+      await addOwned(userId, 'audit_logs', { action: 'DISCOUNT_MANAGER_CONFIGURED', entityType: 'STAFF_ACCOUNT',
+        entityId: ctx.params.id, managerName: record.managerName, discountLimitPercent: record.discountLimitPercent, createdAt: now });
+      return json({ manager: { id: ctx.params.id, name: record.managerName, role: record.role, configured: true, discountLimitPercent: record.discountLimitPercent } });
     },
   ],
 
@@ -649,34 +1381,7 @@ export const handler = router({
   ],
   'GET /api/team': [
     requireAuth(),
-    async ctx => {
-      const items = await listOwned(ctx.user!.userId, 'team');
-      return json({ items: items.map((item: any) => {
-        const { discountPinSalt, discountPinHash, ...safe } = item;
-        return { ...safe, discountPinConfigured: Boolean(discountPinSalt && discountPinHash) };
-      }) });
-    },
-  ],
-  'PUT /api/team/:id/discount-pin': [
-    requireAuth(),
-    async ctx => {
-      const userId = ctx.user!.userId;
-      const team = await listOwned(userId, 'team');
-      const manager = team.find((item: any) => item.id === ctx.params.id);
-      if (!manager) return error('Team member not found.', 404);
-      if (manager.role !== 'Branch Manager' || manager.status === 'inactive') return error('Only an active Branch Manager can be configured to approve discounts.', 403);
-      const body = (ctx.body || {}) as Record<string, unknown>;
-      const pin = textField(body.pin, 12);
-      const discountLimitPercent = Number(body.discountLimitPercent);
-      if (!/^\d{6}$/.test(pin)) return error('Set a six-digit discount approval PIN.', 400);
-      if (!Number.isFinite(discountLimitPercent) || discountLimitPercent <= 0 || discountLimitPercent > 100) return error('Set a maximum discount percentage greater than 0 and no more than 100.', 400);
-      const salt = randomHex(16);
-      const hash = await deriveDiscountPinHash(pin, salt);
-      const updated = { ...manager, discountPinSalt: salt, discountPinHash: hash, discountLimitPercent: Math.round(discountLimitPercent * 100) / 100, discountPinUpdatedAt: new Date().toISOString() };
-      const [ok] = await db.update(table(userId, 'team'), [{ id: manager.id, record: updated }]);
-      if (!ok) return error('The manager approval PIN could not be saved.', 500);
-      return json({ ok: true, managerId: manager.id, discountPinConfigured: true });
-    },
+    async ctx => json({ items: await listOwned(ctx.user!.userId, 'team') }),
   ],
   'POST /api/team': [
     requireAuth(),
@@ -713,6 +1418,125 @@ export const handler = router({
         status: 'profile_only',
       });
       return json({ member: saved }, 201);
+    },
+  ],
+
+
+  'GET /api/master-catalogue/current': [
+    requireAuth(),
+    async () => {
+      const current = await getCurrentMasterRelease();
+      return json({ release: current.release, items: current.items });
+    },
+  ],
+  'GET /api/desktop/master-catalogue/current': [
+    async ctx => {
+      const device = await authenticatedDesktop(ctx);
+      if (!device) return error('This desktop is not paired or its device access has been revoked.', 401);
+      const current = await getCurrentMasterRelease();
+      return json({ release: current.release, items: current.items });
+    },
+  ],
+  'GET /api/master-catalogue/admin': [
+    requireAuth(),
+    requireAdminEmailAllowlist(ADMIN_EMAILS),
+    async ctx => {
+      await ensureInitialMasterCatalogue(ctx.user!.userId);
+      const [current, releases] = await Promise.all([getCurrentMasterRelease(), listMasterReleases()]);
+      return json({ release: current.release, items: current.items, releases });
+    },
+  ],
+  'POST /api/master-catalogue/preview': [
+    requireAuth(),
+    requireAdminEmailAllowlist(ADMIN_EMAILS),
+    async ctx => {
+      const body = (ctx.body || {}) as { items?: unknown[] };
+      const validation = validateMasterCatalogueRows(body.items);
+      return json({
+        valid: validation.errors.length === 0,
+        rowCount: validation.rows.length,
+        validCount: Math.max(0, validation.rows.length - validation.errors.length),
+        errors: validation.errors,
+      });
+    },
+  ],
+  'POST /api/master-catalogue/releases': [
+    requireAuth(),
+    requireAdminEmailAllowlist(ADMIN_EMAILS),
+    async ctx => {
+      const body = (ctx.body || {}) as { items?: unknown[] };
+      const validation = validateMasterCatalogueRows(body.items);
+      if (validation.errors.length) return json({ error: 'Correct the CSV validation errors before publishing.', errors: validation.errors }, 400);
+      try {
+        const release = await publishMasterCatalogue(validation.rows, ctx.user!.userId);
+        return json({ release }, 201);
+      } catch (err: any) {
+        return error(err?.message || 'The catalogue release could not be published.', 500);
+      }
+    },
+  ],
+  'POST /api/master-catalogue/rollback/:id': [
+    requireAuth(),
+    requireAdminEmailAllowlist(ADMIN_EMAILS),
+    async ctx => {
+      const releases = await listMasterReleases();
+      const target = releases.find((item: any) => item.id === ctx.params.id && item.status === 'PUBLISHED');
+      if (!target) return error('The selected catalogue version is unavailable.', 404);
+      const saved = await db.list(masterItemsTable(Number(target.version)), { limit: 500 });
+      if (!saved.items.length) return error('The selected catalogue version contains no products.', 409);
+      const rows = saved.items.map((item: any) => ({
+        category: item.category, productFamily: item.productFamily || '', name: item.name,
+        specification: item.specification || '', brand: item.brand || '', sku: item.sku,
+        barcode: item.barcode || '', stockUnit: item.stockUnit, purchaseUnit: item.purchaseUnit || item.stockUnit,
+        conversionFactor: Number(item.conversionFactor || 1), description: item.description || '',
+      }));
+      try {
+        const release = await publishMasterCatalogue(rows, ctx.user!.userId, Number(target.version));
+        return json({ release }, 201);
+      } catch (err: any) {
+        return error(err?.message || 'The catalogue rollback could not be published.', 500);
+      }
+    },
+  ],
+  'POST /api/master-catalogue/adopt': [
+    requireAuth(),
+    async ctx => {
+      const body = (ctx.body || {}) as { productIds?: unknown[] };
+      if (!Array.isArray(body.productIds) || body.productIds.length < 1 || body.productIds.length > 500) return error('Select between 1 and 500 master catalogue products.', 400);
+      const current = await getCurrentMasterRelease();
+      if (!current.release) return error('The central master catalogue has not been published yet.', 404);
+      const selectedIds = new Set(body.productIds.filter((id): id is string => typeof id === 'string'));
+      const selected = current.items.filter((item: any) => selectedIds.has(item.id));
+      if (!selected.length || selected.length !== selectedIds.size) return error('One or more selected master catalogue products are no longer available.', 409);
+      const userId = ctx.user!.userId;
+      const existing = await db.list(productTable(userId), { limit: 500 });
+      const seenSkus = new Set(existing.items.map((item: any) => normalise(item.sku)));
+      const seenSpecs = new Set(existing.items.map((item: any) => [item.category, item.name, item.variant, item.brand].map(normalise).join('|')));
+      const now = new Date().toISOString();
+      const accepted: Record<string, unknown>[] = [];
+      let skipped = 0;
+      for (const item of selected) {
+        const sku = normalise(item.sku);
+        const spec = [item.category, item.name, item.specification, item.brand].map(normalise).join('|');
+        if ((sku && seenSkus.has(sku)) || seenSpecs.has(spec)) { skipped++; continue; }
+        if (sku) seenSkus.add(sku);
+        seenSpecs.add(spec);
+        accepted.push({
+          name: item.name, category: item.category, unit: item.stockUnit, brand: item.brand || '',
+          variant: item.specification || '', sku: item.sku, barcode: item.barcode || '',
+          purchaseUnit: item.purchaseUnit || item.stockUnit, conversionFactor: Number(item.conversionFactor || 1),
+          buyingPrice: 0, sellingPrice: 0, reorderLevel: 0, taxCategory: 'Unconfigured',
+          active: true, source: 'master_catalogue', masterProductId: item.id, masterVersion: current.release.version,
+          ownerUserId: userId, createdAt: now, updatedAt: now,
+        });
+      }
+      if (!accepted.length) return json({ added: 0, skipped, message: 'All selected products already exist in your business catalogue.' });
+      const ids = await db.add(productTable(userId), accepted);
+      if (ids.some(id => !id)) {
+        await db.delete(productTable(userId), ids.filter((id): id is string => Boolean(id)));
+        return error('The selected products could not all be added. No stock or prices were created.', 500);
+      }
+      return json({ added: ids.length, skipped, masterVersion: current.release.version });
     },
   ],
 
@@ -925,18 +1749,34 @@ export const handler = router({
       const total = Math.round(saleItems.reduce((sum, item) => sum + item.lineTotal, 0) * 100) / 100;
       const hasDiscount = saleItems.some(item => item.discountPercent > 0);
       const approval = body.discountApproval || {};
-      let approvedManager: any = null;
+      let verifiedApproval: any = null;
       if (hasDiscount) {
-        const managerId = textField(approval.managerId, 120);
-        const pin = textField(approval.pin, 12);
+        const managerStaffId = textField(approval.managerStaffId, 120);
+        const pin = textField(approval.pin, 64);
         const reason = textField(approval.reason, 300);
-        if (!managerId || !/^\d{6}$/.test(pin) || !reason) return error('Discounts require a configured Branch Manager, their six-digit approval PIN and a reason.', 400);
-        approvedManager = await verifyDiscountManagerPin(userId, managerId, pin);
-        if (!approvedManager) return error('Manager approval failed. Check the manager PIN or contact the Business Owner if the manager is locked after repeated failed attempts.', 403);
-        if (approvedManager.branchId && approvedManager.branchId !== branchId) return error('This Branch Manager is not authorised to approve discounts for the selected branch.', 403);
-        const requestedDiscountPercent = Math.max(...saleItems.map((item: any) => Number(item.discountPercent || 0)));
-        const allowedDiscountPercent = Number(approvedManager.discountLimitPercent ?? 100);
-        if (requestedDiscountPercent > allowedDiscountPercent + 0.000001) return error('The requested discount exceeds this manager’s authorised limit of ' + allowedDiscountPercent + '%. Ask a manager with a higher approval limit or the Business Owner.', 403);
+        if (!managerStaffId || pin.length < 8 || !reason) return error('Discounted sales require an active manager account, approval PIN and reason.', 400);
+        const staff = await getSyncedStaff(userId);
+        const manager = staff.find((item: any) => item.profile?.id === managerStaffId &&
+          ['Manager', 'Business Owner'].includes(item.profile?.role) && item.profile?.status !== 'inactive' &&
+          item.account?.status !== 'inactive' && item.account?.mustChangePassword !== true);
+        if (!manager) return error('The selected manager account is inactive or has not completed first-time password setup.', 403);
+        const credentials = await listOwned(userId, 'discount_manager_credentials');
+        const credential = credentials.find((item: any) => item.managerStaffId === managerStaffId && item.active !== false);
+        if (!credential) return error('This manager has not been configured for discount approval by the Business Owner.', 403);
+        const attempts = await listOwned(userId, 'discount_approval_attempts');
+        const recentFailures = attempts.filter((item: any) => item.managerStaffId === managerStaffId && item.success !== true &&
+          Date.now() - new Date(item.createdAt).getTime() < 15 * 60 * 1000);
+        if (recentFailures.length >= 5) return error('Too many incorrect approval attempts. Try again after 15 minutes.', 429);
+        const candidate = await discountPinHash(pin, credential.salt, Number(credential.iterations || 310000));
+        if (!constantTimeEqual(candidate, String(credential.pinHash || ''))) {
+          await addOwned(userId, 'discount_approval_attempts', { managerStaffId, success: false, createdAt: new Date().toISOString() });
+          return error('Manager approval PIN is incorrect.', 401);
+        }
+        const limit = Number(credential.discountLimitPercent || 0);
+        const requestedMaximum = Math.max(...saleItems.map(item => Number(item.discountPercent || 0)));
+        if (requestedMaximum > limit + 0.000001) return error('This manager can approve discounts up to ' + limit + '%. The requested discount is ' + requestedMaximum + '%.', 403);
+        verifiedApproval = { managerStaffId, managerName: textField(manager.profile.displayName || manager.account.username, 120),
+          managerRole: manager.profile.role, discountLimitPercent: limit, reason, verifiedAt: new Date().toISOString() };
       }
       if (!Array.isArray(body.payments) || !body.payments.length) return error('Enter at least one payment method.', 400);
       const payments = body.payments.map((p: any) => ({ method: textField(p.method, 20).toUpperCase(), amount: Number(p.amount), reference: textField(p.reference, 80) }));
@@ -951,12 +1791,13 @@ export const handler = router({
         receiptNumber, branchId, warehouseId, shiftId: shift.id,
         customerName: textField(body.customerName, 120) || 'Walk-in customer',
         customerPhone: textField(body.customerPhone, 40),
-        items: saleItems, payments, total, discountApproval: hasDiscount ? { managerId: approvedManager.id, managerName: approvedManager.name, reason: textField(approval.reason, 300), recordedAt: now } : null, status: 'COMPLETED', createdAt: now,
+        items: saleItems, payments, total, discountApproval: verifiedApproval, status: 'COMPLETED', createdAt: now,
       });
-      if (hasDiscount) await addOwned(userId, 'audit_logs', { action: 'SALE_DISCOUNT_APPROVED', entityType: 'SALE', entityId: sale.id, reference: receiptNumber, managerId: approvedManager.id, managerName: approvedManager.name, managerBranchId: approvedManager.branchId || null, managerDiscountLimitPercent: Number(approvedManager.discountLimitPercent ?? 100), highestLineDiscountPercent: Math.max(...saleItems.map((item: any)=>Number(item.discountPercent || 0))), reason: textField(approval.reason, 300), discountTotal: saleItems.reduce((sum,item)=>sum+item.discountAmount,0), createdAt: now });
+      if (hasDiscount) await addOwned(userId, 'audit_logs', { action: 'SALE_DISCOUNT_APPROVED', entityType: 'SALE', entityId: sale.id, reference: receiptNumber, ...verifiedApproval, discountTotal: saleItems.reduce((sum,item)=>sum+item.discountAmount,0), createdAt: now });
       const stockRows = saleItems.map(item => ({
         type: 'SALE', productId: item.productId, branchId, warehouseId,
-        quantity: item.quantity, unitCost: 0, totalCost: 0,
+        quantity: item.quantity, unitCost: Number(item.unitCost || 0),
+        totalCost: Math.round(Number(item.unitCost || 0) * Number(item.quantity || 0) * 100) / 100,
         reference: receiptNumber, note: 'POS sale', ownerUserId: userId, createdAt: now, updatedAt: now,
       }));
       const ids = await db.add(table(userId, 'stock_movements'), stockRows);
@@ -1005,26 +1846,48 @@ export const handler = router({
       const body = (ctx.body || {}) as Record<string, unknown>;
       const closingCash = Number(body.closingCash);
       const closingMpesa = Number(body.closingMpesa);
-      if (!Number.isFinite(closingCash) || closingCash < 0 || !Number.isFinite(closingMpesa) || closingMpesa < 0) return error('Enter valid closing cash and M-Pesa balances.', 400);
+      if (!Number.isFinite(closingCash) || closingCash < 0 || !Number.isFinite(closingMpesa) || closingMpesa < 0)
+        return error('Enter valid non-negative closing cash and M-Pesa totals.', 400);
+
       const sales = await listOwned(userId, 'sales');
       const returns = await listOwned(userId, 'sales_returns');
       const shiftSales = sales.filter((sale: any) => sale.shiftId === shift.id && sale.status === 'COMPLETED');
-      const shiftRefunds = returns.filter((item: any) => item.refundShiftId === shift.id && item.status === 'REFUNDED');
-      const cashSales = shiftSales.reduce((sum: number, sale: any) => sum + (sale.payments || []).filter((p: any) => p.method === 'CASH').reduce((n: number, p: any) => n + Number(p.amount || 0), 0), 0);
-      const mpesaSales = shiftSales.reduce((sum: number, sale: any) => sum + (sale.payments || []).filter((p: any) => p.method === 'MPESA').reduce((n: number, p: any) => n + Number(p.amount || 0), 0), 0);
-      const cashRefunds = shiftRefunds.filter((item: any) => item.refundMethod === 'CASH').reduce((sum: number, item: any) => sum + Number(item.refundAmount || 0), 0);
-      const mpesaRefunds = shiftRefunds.filter((item: any) => item.refundMethod === 'MPESA').reduce((sum: number, item: any) => sum + Number(item.refundAmount || 0), 0);
-      const expectedCash = Math.round((Number(shift.openingFloat || 0) + cashSales - cashRefunds) * 100) / 100;
-      const expectedMpesa = Math.round((mpesaSales - mpesaRefunds) * 100) / 100;
+      const shiftRefunds = returns.filter((record: any) => record.status === 'REFUNDED' && record.refundShiftId === shift.id);
+      const sumPayments = (rows: any[], method: string) => rows.reduce((sum: number, row: any) =>
+        sum + (row.payments || []).filter((payment: any) => payment.method === method)
+          .reduce((paymentSum: number, payment: any) => paymentSum + Number(payment.amount || 0), 0), 0);
+      const cashRefunds = shiftRefunds.filter((record: any) => record.refundMethod === 'CASH')
+        .reduce((sum: number, record: any) => sum + Number(record.refundAmount || 0), 0);
+      const mpesaRefunds = shiftRefunds.filter((record: any) => record.refundMethod === 'MPESA')
+        .reduce((sum: number, record: any) => sum + Number(record.refundAmount || 0), 0);
+      const expectedCash = Math.round((Number(shift.openingFloat || 0) + sumPayments(shiftSales, 'CASH') - cashRefunds) * 100) / 100;
+      const expectedMpesa = Math.round((sumPayments(shiftSales, 'MPESA') - mpesaRefunds) * 100) / 100;
       const cashVariance = Math.round((closingCash - expectedCash) * 100) / 100;
       const mpesaVariance = Math.round((closingMpesa - expectedMpesa) * 100) / 100;
-      const summary = { openingFloat: Number(shift.openingFloat || 0), cashSales, mpesaSales, cashRefunds, mpesaRefunds, expectedCash, expectedMpesa, closingCash, closingMpesa, cashVariance, mpesaVariance, totalExpected: Math.round((expectedCash + expectedMpesa) * 100) / 100, totalCounted: Math.round((closingCash + closingMpesa) * 100) / 100, totalVariance: Math.round((cashVariance + mpesaVariance) * 100) / 100, saleCount: shiftSales.length, refundCount: shiftRefunds.length };
-      const now = new Date().toISOString();
-      const closedShift = { ...shift, ...summary, reconciliation: summary, status: 'CLOSED', closedAt: now };
-      const [ok] = await db.update(table(userId, 'pos_shifts'), [{ id: shift.id, record: closedShift }]);
+      const reconciliation = {
+        salesCount: shiftSales.length,
+        refundsCount: shiftRefunds.length,
+        openingFloat: Number(shift.openingFloat || 0),
+        cashSales: Math.round(sumPayments(shiftSales, 'CASH') * 100) / 100,
+        mpesaSales: Math.round(sumPayments(shiftSales, 'MPESA') * 100) / 100,
+        cashRefunds: Math.round(cashRefunds * 100) / 100,
+        mpesaRefunds: Math.round(mpesaRefunds * 100) / 100,
+        expectedCash, expectedMpesa, closingCash, closingMpesa,
+        cashVariance, mpesaVariance,
+        totalVariance: Math.round((cashVariance + mpesaVariance) * 100) / 100,
+      };
+      const closedAt = new Date().toISOString();
+      const updatedShift = {
+        ...shift, ...reconciliation, status: 'CLOSED', closedAt,
+        reconciliationStatus: Math.abs(cashVariance) < 0.01 && Math.abs(mpesaVariance) < 0.01 ? 'BALANCED' : 'VARIANCE',
+      };
+      const [ok] = await db.update(table(userId, 'pos_shifts'), [{ id: shift.id, record: updatedShift }]);
       if (!ok) return error('The cashier shift could not be closed.', 500);
-      await addOwned(userId, 'audit_logs', { action: 'CASHIER_SHIFT_RECONCILED', entityType: 'POS_SHIFT', entityId: shift.id, reference: shift.id, ...summary, createdAt: now });
-      return json({ shift: closedShift, reconciliation: summary });
+      await addOwned(userId, 'audit_logs', {
+        action: 'CASHIER_SHIFT_RECONCILED', entityType: 'POS_SHIFT', entityId: shift.id,
+        reconciliation, createdAt: closedAt,
+      });
+      return json({ shift: { ...updatedShift, id: shift.id }, reconciliation });
     },
   ],
 
@@ -1065,16 +1928,16 @@ export const handler = router({
         quantity, condition, refundMethod, refundAmount, reason,
         status: 'REFUND_DUE', stockRestored: condition === 'RESTOCK', createdAt: now,
       });
+      const returnCost = Math.round(Number(soldItem.unitCost || 0) * quantity * 100) / 100;
       if (condition === 'RESTOCK') {
         const [movementId] = await db.add(table(userId, 'stock_movements'), [{
           type: 'RETURN', productId, branchId: sale.branchId, warehouseId: sale.warehouseId,
-          quantity, unitCost: 0, totalCost: 0, reference: returnNumber,
+          quantity, unitCost: Number(soldItem.unitCost || 0), totalCost: returnCost, reference: returnNumber,
           note: 'Resalable customer return against ' + sale.receiptNumber,
           ownerUserId: userId, createdAt: now, updatedAt: now,
         }]);
         if (!movementId) throw new Error('Return record saved but stock restoration needs administrator review. Do not submit this return again.');
       }
-      const returnCost = Math.round(Number(soldItem.unitCost || 0) * quantity * 100) / 100;
       const returnLines: Array<{ accountCode: string; debit?: number; credit?: number }> = [
         { accountCode: '4010', debit: refundAmount },
         { accountCode: '2010', credit: refundAmount },
@@ -1104,8 +1967,10 @@ export const handler = router({
       const now = new Date().toISOString();
       const openShifts = await listOwned(userId, 'pos_shifts');
       const refundShift = openShifts.find((item: any) => item.status === 'OPEN' && item.branchId === record.branchId);
-      if (!refundShift) return error('Open a cashier shift for this branch before paying a cash or M-Pesa refund.', 409);
-      const updated = { ...record, status: 'REFUNDED', refundMethod: paymentMethod, refundReference: reference, refundedAt: now, refundSettledBy: userId, refundShiftId: refundShift.id };
+      const updated = {
+        ...record, status: 'REFUNDED', refundMethod: paymentMethod, refundReference: reference,
+        refundedAt: now, refundSettledBy: userId, refundShiftId: refundShift?.id || null,
+      };
       const [ok] = await db.update(table(userId, 'sales_returns'), [{ id: record.id, record: updated }]);
       if (!ok) return error('Refund settlement could not be saved.', 500);
       await postJournal(userId, { sourceType: 'RETURN_REFUND', sourceId: record.id, reference: reference || record.returnNumber, description: 'Refund paid for ' + record.returnNumber, lines: [{ accountCode: '2010', debit: Number(record.refundAmount) }, { accountCode: cashAccountCode(paymentMethod), credit: Number(record.refundAmount) }] });
