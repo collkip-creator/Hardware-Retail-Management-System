@@ -2665,7 +2665,7 @@ async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor
     }
     let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
     write_sync_value(&connection,"last_sync_at",&updated_at)?;
-    Ok(SyncResult{owner,updated_at,branches,staff})
+    Ok(SyncResult{owner_device:owner,updated_at,branches,staff})
 }
 
 #[tauri::command]
