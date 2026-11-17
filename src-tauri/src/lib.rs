@@ -2202,9 +2202,25 @@ async fn pair_desktop_device(
     }
     let token = body.get("deviceToken").and_then(|v|v.as_str()).ok_or_else(|| "The owner portal did not issue a device credential.".to_string())?;
     let owner_device = body.get("ownerDevice").and_then(|v|v.as_bool()).unwrap_or(false);
+    let licence_id = body.get("licenceId").and_then(|v|v.as_str()).unwrap_or("");
+    let licence_status = body.get("licenceStatus").and_then(|v|v.as_str()).unwrap_or("active");
+    let plan = body.get("plan").and_then(|v|v.as_str()).unwrap_or("");
+    let expires_at = body.get("expiresAt").and_then(|v|v.as_str()).unwrap_or("");
+    let device_limit = body.get("deviceLimit").and_then(|v|v.as_i64()).unwrap_or(1).to_string();
+    let branch_limit = body.get("branchLimit").and_then(|v|v.as_i64()).unwrap_or(1).to_string();
+    let business_id = body.get("businessId").and_then(|v|v.as_str()).unwrap_or("");
+    let business_name = body.get("businessName").and_then(|v|v.as_str()).unwrap_or("");
     let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
     write_sync_value(&connection, "device_token", token)?;
     write_sync_value(&connection, "owner_device", if owner_device { "true" } else { "false" })?;
+    write_sync_value(&connection, "licence_id", licence_id)?;
+    write_sync_value(&connection, "licence_status", licence_status)?;
+    write_sync_value(&connection, "licence_plan", plan)?;
+    write_sync_value(&connection, "licence_expires_at", expires_at)?;
+    write_sync_value(&connection, "licence_device_limit", &device_limit)?;
+    write_sync_value(&connection, "licence_branch_limit", &branch_limit)?;
+    write_sync_value(&connection, "business_id", business_id)?;
+    write_sync_value(&connection, "business_name", business_name)?;
     connection.execute("UPDATE devices SET device_name=?1,last_seen_at=CURRENT_TIMESTAMP WHERE id=?2",params![device_name.trim(),device_id]).map_err(|e|e.to_string())?;
     Ok(PairingResult { device_id, owner_device })
 }
