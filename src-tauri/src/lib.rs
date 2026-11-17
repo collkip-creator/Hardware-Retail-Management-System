@@ -2500,7 +2500,6 @@ fn apply_remote_snapshot(connection: &mut Connection, snapshot: &serde_json::Val
 }
 
 #[tauri::command]
-#[tauri::command]
 async fn bootstrap_desktop_workspace(database: tauri::State<'_, LocalDatabase>) -> Result<SyncResult, String> {
     let token = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
@@ -2524,6 +2523,7 @@ async fn bootstrap_desktop_workspace(database: tauri::State<'_, LocalDatabase>) 
     Ok(SyncResult{owner_device:false,updated_at,branches,staff})
 }
 
+#[tauri::command]
 async fn sync_desktop_workspace(database: tauri::State<'_, LocalDatabase>, actor_staff_id: String) -> Result<SyncResult, String> {
     let (token, owner, actor_password_hash, pending_passwords, customers, stock_movements, financial) = {
         let connection=database.0.lock().map_err(|_|"Local database is busy".to_string())?;
