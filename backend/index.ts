@@ -214,7 +214,26 @@ export const handler = router({
     async ctx => {
       const device = await authenticatedDesktop(ctx);
       if (!device) return error('Sign in on an authorised business computer before generating a pairing code.', 401);
-      if (!device.ownerDevice) return error('Only the primary Business Owner computer can generate pairing codes.', 403);
+      const body = (ctx.body || {}) as Record<string, unknown>;
+      const actorStaffId = textField(body.actorStaffId, 100);
+      const passwordHash = textField(body.passwordHash, 300);
+      if (!actorStaffId || !passwordHash.startsWith('$argon2')) {
+        return error('Sign in as the Business Owner before generating a pairing code.', 403);
+      }
+      const syncRows = await db.list(table(device.userId, 'desktop_sync_state'), { limit: 1 });
+      const snapshot = syncRows.items[0]?.snapshot;
+      const staffRows = Array.isArray(snapshot?.staff) ? snapshot.staff : [];
+      const ownerAccount = staffRows.find((item: any) =>
+        item.profile?.id === actorStaffId &&
+        item.profile?.role === 'Business Owner' &&
+        item.profile?.status === 'active' &&
+        item.account?.status === 'active' &&
+        item.account?.mustChangePassword !== true &&
+        item.account?.passwordHash === passwordHash
+      );
+      if (!ownerAccount) return error('The signed-in account could not be verified as this business active Business Owner. Sync and sign in again.', 403);
+      const licence = await getLicenceForBusiness(device.userId);
+      if (!licenceIsUsable(licence)) return error('The business licence is not active. Refresh licence status before generating pairing codes.', 403);
       const devices = await db.list(table(device.userId, 'desktop_devices'), { limit: 100 });
       const activeDevices = devices.items.filter((item: any) => item.status === 'active');
       if (activeDevices.length >= 100) return error('The current device allowance has been reached. Contact the software provider to review your licence.', 403);
