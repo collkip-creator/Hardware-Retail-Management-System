@@ -60,7 +60,7 @@ export default function DesktopApp() {
         let local = await invoke<LocalStatus>('get_local_status');
         const sync = await invoke<SyncStatus>('get_device_sync_status');
         setSyncStatus(sync);
-        if (sync.paired && navigator.onLine) {
+        if (sync.paired && navigator.onLine && local.staffCount === 0) {
           try {
             const result = await invoke<SyncResult>('bootstrap_desktop_workspace');
             setSyncStatus({ ...sync, lastSyncAt: result.updatedAt });
