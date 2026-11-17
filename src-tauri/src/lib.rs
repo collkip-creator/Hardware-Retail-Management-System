@@ -2052,7 +2052,21 @@ async fn get_device_sync_status(database: tauri::State<'_, LocalDatabase>) -> Re
                         licence_status = body["status"].as_str().unwrap_or("none").to_string();
                         licence_message = body["message"].as_str().map(str::to_string);
                         if let Ok(connection) = database.0.lock() {
+                            let licence_id = body["licenceId"].as_str().or(body["id"].as_str()).unwrap_or("");
+                            let plan = body["plan"].as_str().unwrap_or("");
+                            let expires_at = body["expiresAt"].as_str().unwrap_or("");
+                            let device_limit = body["deviceLimit"].as_i64().unwrap_or(1).to_string();
+                            let branch_limit = body["branchLimit"].as_i64().unwrap_or(1).to_string();
+                            let business_id = body["businessId"].as_str().unwrap_or("");
+                            let business_name = body["businessName"].as_str().unwrap_or("");
+                            let _ = write_sync_value(&connection, "licence_id", licence_id);
                             let _ = write_sync_value(&connection, "licence_status", &licence_status);
+                            let _ = write_sync_value(&connection, "licence_plan", plan);
+                            let _ = write_sync_value(&connection, "licence_expires_at", expires_at);
+                            let _ = write_sync_value(&connection, "licence_device_limit", &device_limit);
+                            let _ = write_sync_value(&connection, "licence_branch_limit", &branch_limit);
+                            let _ = write_sync_value(&connection, "business_id", business_id);
+                            let _ = write_sync_value(&connection, "business_name", business_name);
                         }
                     }
                 }
@@ -2106,11 +2120,23 @@ async fn refresh_desktop_licence_status(
     let licence_status = body["status"].as_str().unwrap_or("none").to_string();
     let licence_message = body["message"].as_str().map(str::to_string);
     let expires_at = body["expiresAt"].as_str().unwrap_or("");
+    let licence_id = body["licenceId"].as_str().or(body["id"].as_str()).unwrap_or("");
+    let plan = body["plan"].as_str().unwrap_or("");
+    let device_limit = body["deviceLimit"].as_i64().unwrap_or(1).to_string();
+    let branch_limit = body["branchLimit"].as_i64().unwrap_or(1).to_string();
+    let business_id = body["businessId"].as_str().unwrap_or("");
+    let business_name = body["businessName"].as_str().unwrap_or("");
 
     {
         let connection = database.0.lock().map_err(|_| "Local database is busy".to_string())?;
+        write_sync_value(&connection, "licence_id", licence_id)?;
         write_sync_value(&connection, "licence_status", &licence_status)?;
+        write_sync_value(&connection, "licence_plan", plan)?;
         write_sync_value(&connection, "licence_expires_at", expires_at)?;
+        write_sync_value(&connection, "licence_device_limit", &device_limit)?;
+        write_sync_value(&connection, "licence_branch_limit", &branch_limit)?;
+        write_sync_value(&connection, "business_id", business_id)?;
+        write_sync_value(&connection, "business_name", business_name)?;
     }
 
     Ok(DeviceSyncStatus {
