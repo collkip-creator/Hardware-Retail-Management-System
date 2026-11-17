@@ -62,7 +62,7 @@ export default function DesktopApp() {
         setSyncStatus(sync);
         if (sync.paired && navigator.onLine) {
           try {
-            const result = await invoke<SyncResult>('sync_desktop_workspace');
+            const result = await invoke<SyncResult>('bootstrap_desktop_workspace');
             setSyncStatus({ ...sync, lastSyncAt: result.updatedAt });
             local = await invoke<LocalStatus>('get_local_status');
           } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); }
@@ -108,7 +108,7 @@ export default function DesktopApp() {
       if (running || !navigator.onLine || document.visibilityState === 'hidden') return;
       running = true;
       try {
-        const result = await invoke<SyncResult>('sync_desktop_workspace');
+        const result = await invoke<SyncResult>('sync_desktop_workspace', { actorStaffId: session.staffId });
         const changed = !!lastCloudVersion.current && lastCloudVersion.current !== result.updatedAt;
         lastCloudVersion.current = result.updatedAt;
         setSyncStatus(current => ({ ...current, lastSyncAt: result.updatedAt }));
@@ -130,7 +130,7 @@ export default function DesktopApp() {
     const current = await invoke<SyncStatus>('get_device_sync_status');
     setSyncStatus(current);
     if (!current.paired || !navigator.onLine) return;
-    const result = await invoke<SyncResult>('sync_desktop_workspace');
+    const result = await invoke<SyncResult>('sync_desktop_workspace', { actorStaffId: session!.staffId });
     setSyncStatus({ ...current, lastSyncAt: result.updatedAt });
   }
 
@@ -154,7 +154,7 @@ export default function DesktopApp() {
       if (!navigator.onLine) throw new Error('Connect this computer to the internet before pairing.');
       await invoke('pair_desktop_device', { pairingCode: pairingCode.trim(), deviceName: 'Windows desktop' });
       setPairingCode('');
-      const result = await invoke<SyncResult>('sync_desktop_workspace');
+      const result = await invoke<SyncResult>('bootstrap_desktop_workspace');
       const next = await invoke<SyncStatus>('get_device_sync_status');
       setSyncStatus({ ...next, lastSyncAt: result.updatedAt });
       setStatus(await invoke<LocalStatus>('get_local_status'));
@@ -181,7 +181,7 @@ export default function DesktopApp() {
     if (syncing) return;
     setError(''); setNotice(''); setSyncing(true);
     try {
-      const result = await invoke<SyncResult>('sync_desktop_workspace');
+      const result = await invoke<SyncResult>('sync_desktop_workspace', { actorStaffId: session!.staffId });
       const next = await invoke<SyncStatus>('get_device_sync_status');
       setSyncStatus({ ...next, lastSyncAt: result.updatedAt });
       lastCloudVersion.current = result.updatedAt;
@@ -222,7 +222,7 @@ export default function DesktopApp() {
       setSession(result); setPassword('');
       setStatus(await invoke<LocalStatus>('get_local_status'));
       const sync = await invoke<SyncStatus>('get_device_sync_status'); setSyncStatus(sync);
-      if (sync.paired && navigator.onLine) { try { const result = await invoke<SyncResult>('sync_desktop_workspace'); setSyncStatus({ ...sync, lastSyncAt: result.updatedAt }); } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); } }
+      if (sync.paired && navigator.onLine) { try { const result = await invoke<SyncResult>('sync_desktop_workspace', { actorStaffId: result.staffId }); setSyncStatus({ ...sync, lastSyncAt: result.updatedAt }); } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); } }
     } catch (reason) { setError(String(reason).replace(/^Error: /, '')); }
     finally { setBusy(false); }
   }
@@ -294,7 +294,7 @@ export default function DesktopApp() {
   );
 
 
-  if (session.mustChangePassword) return <main className="screen"><section className="panel narrow"><Brand/><h1>Change your temporary password</h1><p className="muted">Your owner provided a temporary password. Set a new password before continuing.</p><form onSubmit={async (event)=>{event.preventDefault();setError('');if(newPassword!==confirmPassword){setError('The new passwords do not match.');return;}setBusy(true);try{await invoke('change_staff_password',{staffId:session.staffId,currentPassword,newPassword});try{const sync=await invoke<SyncResult>('sync_desktop_workspace');const syncState=await invoke<SyncStatus>('get_device_sync_status');setSyncStatus({...syncState,lastSyncAt:sync.updatedAt});setNotice('Your new password has been synchronised securely.');}catch{setNotice('Your password has been changed on this computer. Cloud synchronisation will retry when internet is available.');}setSession({...session,mustChangePassword:false});setCurrentPassword('');setNewPassword('');setConfirmPassword('');}catch(e){setError(String(e));}finally{setBusy(false);}}}><label>Temporary password<input type="password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} required/></label><label>New password<input type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} minLength={12} maxLength={128} required/><small>Use at least 12 characters.</small></label><label>Confirm new password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required/></label>{error&&<p className="error">{error}</p>}<button className="primary" disabled={busy}>{busy?'Saving…':'Save new password'}</button></form><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
+  if (session.mustChangePassword) return <main className="screen"><section className="panel narrow"><Brand/><h1>Change your temporary password</h1><p className="muted">Your owner provided a temporary password. Set a new password before continuing.</p><form onSubmit={async (event)=>{event.preventDefault();setError('');if(newPassword!==confirmPassword){setError('The new passwords do not match.');return;}setBusy(true);try{await invoke('change_staff_password',{staffId:session.staffId,currentPassword,newPassword});try{const sync=await invoke<SyncResult>('sync_desktop_workspace',{actorStaffId:session.staffId});const syncState=await invoke<SyncStatus>('get_device_sync_status');setSyncStatus({...syncState,lastSyncAt:sync.updatedAt});setNotice('Your new password has been synchronised securely.');}catch{setNotice('Your password has been changed on this computer. Cloud synchronisation will retry when internet is available.');}setSession({...session,mustChangePassword:false});setCurrentPassword('');setNewPassword('');setConfirmPassword('');}catch(e){setError(String(e));}finally{setBusy(false);}}}><label>Temporary password<input type="password" value={currentPassword} onChange={e=>setCurrentPassword(e.target.value)} required/></label><label>New password<input type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} minLength={12} maxLength={128} required/><small>Use at least 12 characters.</small></label><label>Confirm new password<input type="password" value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} minLength={12} maxLength={128} required/></label>{error&&<p className="error">{error}</p>}<button className="primary" disabled={busy}>{busy?'Saving…':'Save new password'}</button></form><button className="secondary" onClick={()=>setSession(null)}>Sign out</button></section></main>;
 
   if (session.role !== 'Business Owner') {
     const staffTabs: { id: Tab; label: string }[] = [
