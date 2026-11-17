@@ -222,7 +222,7 @@ export default function DesktopApp() {
       setSession(result); setPassword('');
       setStatus(await invoke<LocalStatus>('get_local_status'));
       const sync = await invoke<SyncStatus>('get_device_sync_status'); setSyncStatus(sync);
-      if (sync.paired && navigator.onLine) { try { const result = await invoke<SyncResult>('sync_desktop_workspace', { actorStaffId: result.staffId }); setSyncStatus({ ...sync, lastSyncAt: result.updatedAt }); } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); } }
+      if (sync.paired && navigator.onLine) { try { const syncResult = await invoke<SyncResult>('sync_desktop_workspace', { actorStaffId: result.staffId }); setSyncStatus({ ...sync, lastSyncAt: syncResult.updatedAt }); } catch (syncError) { setError('Cloud sync is pending: ' + String(syncError)); } }
     } catch (reason) { setError(String(reason).replace(/^Error: /, '')); }
     finally { setBusy(false); }
   }
